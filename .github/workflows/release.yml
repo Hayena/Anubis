@@ -75,9 +75,12 @@ jobs:
 
       - name: Create output directories
         run: |
-          mkdir -p artifacts
-          mkdir -p artifacts/${{ runner.os }}/x86_64
-          mkdir -p artifacts/${{ runner.os }}/aarch64
+          mkdir -p artifacts/linux/x86_64
+          mkdir -p artifacts/linux/aarch64
+          mkdir -p artifacts/darwin/x86_64
+          mkdir -p artifacts/darwin/aarch64
+          mkdir -p artifacts/windows/x86_64
+          mkdir -p artifacts/windows/aarch64
         shell: bash
 
       - name: Copy release binary (Linux)
