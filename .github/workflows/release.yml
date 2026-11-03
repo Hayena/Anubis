@@ -19,15 +19,15 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary_name: proxify
+            binary_name: anubis
             artifact_dir: linux
           - os: macos-latest
             target: x86_64-apple-darwin
-            binary_name: proxify
+            binary_name: anubis
             artifact_dir: darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary_name: proxify.exe
+            binary_name: anubis.exe
             artifact_dir: windows
 
     steps:
@@ -82,38 +82,38 @@ jobs:
       - name: Copy release binary (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cp target/release/proxify artifacts/linux/x86_64/proxify
-          cp target/release/proxify artifacts/linux/aarch64/proxify
+          cp target/release/anubis artifacts/linux/x86_64/anubis
+          cp target/release/anubis artifacts/linux/aarch64/anubis
         shell: bash
 
       - name: Copy release binary (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          cp target/release/proxify artifacts/darwin/x86_64/proxify
-          cp target/release/proxify artifacts/darwin/aarch64/proxify
+          cp target/release/anubis artifacts/darwin/x86_64/anubis
+          cp target/release/anubis artifacts/darwin/aarch64/anubis
         shell: bash
 
       - name: Copy release binary (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          cp target/release/proxify.exe artifacts/windows/x86_64/proxify.exe
-          cp target/release/proxify.exe artifacts/windows/aarch64/proxify.exe
+          cp target/release/anubis.exe artifacts/windows/x86_64/anubis.exe
+          cp target/release/anubis.exe artifacts/windows/aarch64/anubis.exe
         shell: bash
 
       - name: Verify binary
         run: |
           echo "Binary:"
-          file artifacts/${{ runner.os }}/x86_64/proxify 2>/dev/null || true
-          if [ -f "artifacts/${{ runner.os }}/x86_64/proxify.exe" ]; then
+          file artifacts/${{ runner.os }}/x86_64/anubis 2>/dev/null || true
+          if [ -f "artifacts/${{ runner.os }}/x86_64/anubis.exe" ]; then
             echo "Windows binary:"
-            file artifacts/${{ runner.os }}/x86_64/proxify.exe
+            file artifacts/${{ runner.os }}/x86_64/anubis.exe
           fi
         shell: bash
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: proxify-${{ runner.os }}-${{ matrix.target }}
+          name: anubis-${{ runner.os }}-${{ matrix.target }}
           path: artifacts/${{ runner.os }}
           retention-days: 30
 
@@ -130,7 +130,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: proxify-*
+          pattern: anubis-*
           merge-multiple: true
 
       - name: Get version from Cargo.toml
@@ -145,9 +145,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Proxify v${{ steps.version.outputs.version }}
+          name: Anubis v${{ steps.version.outputs.version }}
           body: |
-            Proxify v${{ steps.version.outputs.version }}
+            Anubis v${{ steps.version.outputs.version }}
 
             A lightweight local forward proxy with adaptive routing.
 
@@ -172,12 +172,12 @@ jobs:
 
             MIT
           files: |
-            artifacts/linux/x86_64/proxify
-            artifacts/linux/aarch64/proxify
-            artifacts/darwin/x86_64/proxify
-            artifacts/darwin/aarch64/proxify
-            artifacts/windows/x86_64/proxify.exe
-            artifacts/windows/aarch64/proxify.exe
+            artifacts/linux/x86_64/anubis
+            artifacts/linux/aarch64/anubis
+            artifacts/darwin/x86_64/anubis
+            artifacts/darwin/aarch64/anubis
+            artifacts/windows/x86_64/anubis.exe
+            artifacts/windows/aarch64/anubis.exe
           draft: false
           prerelease: false
         env:
