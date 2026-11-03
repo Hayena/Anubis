@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+*.exe
+*.pdb
+
+# IDE
+.idea/
+*.swp
+*~
+
+# Temp files
+nul
+*.tmp
+*.log
+
+# Environment
+.env
+.envrc
+IMPROVEMENT_BACKLOG.md

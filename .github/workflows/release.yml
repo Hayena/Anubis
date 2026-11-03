@@ -1,0 +1,190 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: proxify
+            artifact_dir: linux
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: proxify
+            artifact_dir: darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: proxify.exe
+            artifact_dir: windows
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+          # On Windows, we need to use the default target
+          # For linux and macos, we can use the default targets
+
+      - name: Add macOS targets (for Apple Silicon)
+        if: matrix.os == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Add Windows target
+        if: matrix.os == 'windows-latest'
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build (debug)
+        run: cargo build
+        shell: bash
+
+      - name: Build (release)
+        run: cargo build --release
+        shell: bash
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/[^"]*"//g' | sed 's/"$//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Create output directories
+        run: |
+          mkdir -p artifacts
+          mkdir -p artifacts/${{ runner.os }}
+        shell: bash
+
+      - name: Copy release binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cp target/release/proxify artifacts/linux/x86_64/proxify
+          cp target/release/proxify artifacts/linux/aarch64/proxify
+        shell: bash
+
+      - name: Copy release binary (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          cp target/release/proxify artifacts/darwin/x86_64/proxify
+          cp target/release/proxify artifacts/darwin/aarch64/proxify
+        shell: bash
+
+      - name: Copy release binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cp target/release/proxify.exe artifacts/windows/x86_64/proxify.exe
+          cp target/release/proxify.exe artifacts/windows/aarch64/proxify.exe
+        shell: bash
+
+      - name: Verify binary
+        run: |
+          echo "Binary:"
+          file artifacts/${{ runner.os }}/x86_64/proxify 2>/dev/null || true
+          if [ -f "artifacts/${{ runner.os }}/x86_64/proxify.exe" ]; then
+            echo "Windows binary:"
+            file artifacts/${{ runner.os }}/x86_64/proxify.exe
+          fi
+        shell: bash
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxify-${{ runner.os }}-${{ matrix.target }}
+          path: artifacts/${{ runner.os }}
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: proxify-*
+          merge-multiple: true
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/[^"]*"//g' | sed 's/"$//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Proxify v${{ steps.version.outputs.version }}
+          body: |
+            Proxify v${{ steps.version.outputs.version }}
+
+            A lightweight local forward proxy with adaptive routing.
+
+            ## Installation
+
+            Download the binary for your platform:
+
+            - Linux x86_64: `anubis-linux-x86_64`
+            - Linux aarch64: `anubis-linux-aarch64`
+            - macOS (Intel): `anubis-darwin-x86_64`
+            - macOS (Apple Silicon): `anubis-darwin-aarch64`
+            - Windows x86_64: `anubis-windows-x86_64.exe`
+            - Windows aarch64: `anubis-windows-aarch64.exe`
+
+            ## Build from source
+
+            ```bash
+            cargo build --release
+            ```
+
+            ## License
+
+            MIT
+          files: |
+            artifacts/linux/x86_64/proxify
+            artifacts/linux/aarch64/proxify
+            artifacts/darwin/x86_64/proxify
+            artifacts/darwin/aarch64/proxify
+            artifacts/windows/x86_64/proxify.exe
+            artifacts/windows/aarch64/proxify.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        run: |
+          # Artifacts are already uploaded via action-gh-release
+          echo "Release assets uploaded successfully"
+        shell: bash
