@@ -187,12 +187,12 @@ jobs:
 
             MIT
           files: |
-            artifacts/linux/x86_64/anubis
-            artifacts/linux/aarch64/anubis
-            artifacts/darwin/x86_64/anubis
-            artifacts/darwin/aarch64/anubis
-            artifacts/windows/x86_64/anubis.exe
-            artifacts/windows/aarch64/anubis.exe
+            linux/x86_64/anubis
+            linux/aarch64/anubis
+            darwin/x86_64/anubis
+            darwin/aarch64/anubis
+            windows/x86_64/anubis.exe
+            windows/aarch64/anubis.exe
           draft: false
           prerelease: false
         env:
