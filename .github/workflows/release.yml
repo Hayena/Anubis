@@ -77,19 +77,24 @@ jobs:
         run: |
           mkdir -p artifacts
           mkdir -p artifacts/${{ runner.os }}
+          mkdir -p artifacts/${{ runner.os }}/${{ matrix.target }}
         shell: bash
 
       - name: Copy release binary (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           cp target/release/anubis artifacts/linux/x86_64/anubis
-          cp target/release/anubis artifacts/linux/aarch64/anubis
         shell: bash
 
       - name: Copy release binary (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           cp target/release/anubis artifacts/darwin/x86_64/anubis
+        shell: bash
+
+      - name: Copy release binary (macOS - Apple Silicon)
+        if: matrix.os == 'macos-latest'
+        run: |
           cp target/release/anubis artifacts/darwin/aarch64/anubis
         shell: bash
 
@@ -97,6 +102,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cp target/release/anubis.exe artifacts/windows/x86_64/anubis.exe
+        shell: bash
+
+      - name: Copy release binary (Windows - ARM)
+        if: matrix.os == 'windows-latest'
+        run: |
           cp target/release/anubis.exe artifacts/windows/aarch64/anubis.exe
         shell: bash
 
