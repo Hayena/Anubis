@@ -76,8 +76,8 @@ jobs:
       - name: Create output directories
         run: |
           mkdir -p artifacts
-          mkdir -p artifacts/${{ runner.os }}
-          mkdir -p artifacts/${{ runner.os }}/${{ matrix.target }}
+          mkdir -p artifacts/${{ runner.os }}/x86_64
+          mkdir -p artifacts/${{ runner.os }}/aarch64
         shell: bash
 
       - name: Copy release binary (Linux)
