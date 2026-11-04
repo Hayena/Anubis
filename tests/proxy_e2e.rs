@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anubis::config::holder::ConfigHolder;
 use anubis::config::loader::reload;
 use anubis::config::models::{Api, Config, Listen, RuleTarget};
+use anubis::health::store::{HealthStore, InMemoryHealthStore};
 use anubis::metrics::collector::Metrics;
 use anubis::proxy::listener::Proxy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -120,9 +121,17 @@ async fn socks5_session(
 }
 
 async fn start_proxy(holder: Arc<ConfigHolder>, metrics: Arc<Metrics>) -> SocketAddr {
+    start_proxy_with_health(holder, metrics, Arc::new(InMemoryHealthStore::new())).await
+}
+
+async fn start_proxy_with_health(
+    holder: Arc<ConfigHolder>,
+    metrics: Arc<Metrics>,
+    health: Arc<dyn HealthStore>,
+) -> SocketAddr {
     let listener = Proxy::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let proxy = Proxy::new(holder, metrics);
+    let proxy = Proxy::new(holder, metrics, health);
     tokio::spawn(async move { proxy.serve(listener).await });
     addr
 }
@@ -205,11 +214,8 @@ async fn http_upstream_receives_connect_for_the_destination() {
     assert_eq!(metrics.snapshot().proxy_selections.get("up"), Some(&1));
 }
 
-#[tokio::test]
-async fn socks5_upstream_tunnels_to_the_destination() {
-    let echo = spawn_echo("direct:").await;
-    let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
-    let upstream = spawn_socks5_proxy(tx).await;
+/// Holder whose default route is a SOCKS5 upstream named `up` at `upstream`.
+fn socks_holder(upstream: SocketAddr) -> Arc<ConfigHolder> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.conf");
     std::fs::write(
@@ -221,14 +227,47 @@ async fn socks5_upstream_tunnels_to_the_destination() {
         ),
     )
     .unwrap();
-    let holder = Arc::new(ConfigHolder::new(reload(path.to_str().unwrap()).unwrap()));
-    let proxy = start_proxy(holder, Arc::new(Metrics::new())).await;
+    Arc::new(ConfigHolder::new(reload(path.to_str().unwrap()).unwrap()))
+}
+
+#[tokio::test]
+async fn socks5_upstream_tunnels_to_the_destination() {
+    let echo = spawn_echo("direct:").await;
+    let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = spawn_socks5_proxy(tx).await;
+    let proxy = start_proxy(socks_holder(upstream), Arc::new(Metrics::new())).await;
 
     let (status, reply) = connect_and_send(proxy, echo, b"yo").await;
 
     assert!(status.contains("200"), "{status}");
     assert_eq!(reply, b"socks:yo");
     assert_eq!(seen.recv().await.unwrap(), echo.to_string());
+}
+
+#[tokio::test]
+async fn unhealthy_upstream_fails_fast_and_recovers() {
+    let echo = spawn_echo("direct:").await;
+    let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = spawn_socks5_proxy(tx).await;
+    let health = Arc::new(InMemoryHealthStore::new());
+    let metrics = Arc::new(Metrics::new());
+    let proxy = start_proxy_with_health(
+        socks_holder(upstream),
+        Arc::clone(&metrics),
+        Arc::clone(&health) as Arc<dyn HealthStore>,
+    )
+    .await;
+
+    health.set_healthy("up", false, None);
+    let (status, _) = connect_and_send(proxy, echo, b"yo").await;
+    assert!(status.contains("502"), "{status}");
+    assert!(seen.try_recv().is_err(), "must not contact a down upstream");
+    assert_eq!(metrics.snapshot().connections_failed, 1);
+
+    health.set_healthy("up", true, Some(1.0));
+    let (status, reply) = connect_and_send(proxy, echo, b"yo").await;
+    assert!(status.contains("200"), "{status}");
+    assert_eq!(reply, b"socks:yo");
 }
 
 #[tokio::test]

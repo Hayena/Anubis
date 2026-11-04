@@ -15,7 +15,8 @@ use crate::routing::matcher::RuleMatcher;
 /// ViaProxy("nope")    → Err(UpstreamError::UnknownUpstream) → 502 to the client
 /// ```
 ///
-/// Health data is observable via the API but does not influence routing.
+/// Health does not change which rule matches; it is enforced when connecting
+/// (see `proxy::connect::connect_upstream`).
 pub struct RouteEngine {
     matcher: RuleMatcher,
 }

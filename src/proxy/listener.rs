@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::holder::ConfigHolder;
+use crate::health::store::HealthStore;
 use crate::metrics::collector::Metrics;
 use crate::proxy::connect::connect_upstream;
 use crate::routing::decision::RoutingDecision;
@@ -23,6 +24,7 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 pub struct Proxy {
     config: Arc<ConfigHolder>,
     metrics: Arc<Metrics>,
+    health: Arc<dyn HealthStore>,
 }
 
 /// Why a client connection ended abnormally.
@@ -67,8 +69,16 @@ impl Drop for ActiveGuard {
 }
 
 impl Proxy {
-    pub fn new(config: Arc<ConfigHolder>, metrics: Arc<Metrics>) -> Self {
-        Self { config, metrics }
+    pub fn new(
+        config: Arc<ConfigHolder>,
+        metrics: Arc<Metrics>,
+        health: Arc<dyn HealthStore>,
+    ) -> Self {
+        Self {
+            config,
+            metrics,
+            health,
+        }
     }
 
     /// Bind a listener on `addr` (use port 0 for an ephemeral port).
@@ -84,8 +94,9 @@ impl Proxy {
             let (stream, _peer) = listener.accept().await?;
             let config = Arc::clone(&self.config);
             let metrics = Arc::clone(&self.metrics);
+            let health = Arc::clone(&self.health);
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, &config, &metrics).await {
+                if let Err(e) = handle_client(stream, &config, &metrics, health.as_ref()).await {
                     tracing::warn!("client connection failed: {e}");
                 }
             });
@@ -99,6 +110,7 @@ async fn handle_client(
     mut stream: TcpStream,
     config: &ConfigHolder,
     metrics: &Arc<Metrics>,
+    health: &dyn HealthStore,
 ) -> Result<(), ClientError> {
     let (head, leftover) = read_head(&mut stream).await?;
     let dest = request::parse_connect(&head)?;
@@ -110,7 +122,7 @@ async fn handle_client(
     if let RoutingDecision::ViaProxy(name) = &decision {
         metrics.record_selection(name);
     }
-    let mut conn = match connect_upstream(&decision, &dest, &snapshot.manager).await {
+    let mut conn = match connect_upstream(&decision, &dest, &snapshot.manager, health).await {
         Ok(conn) => conn,
         Err(e) => {
             metrics.increment_failed();

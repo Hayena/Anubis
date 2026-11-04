@@ -52,6 +52,9 @@ pub enum UpstreamError {
     #[error("Unknown upstream: {0}")]
     UnknownUpstream(String),
 
+    #[error("Upstream {0} failed its last health check")]
+    Unhealthy(String),
+
     #[error("Upstream connect failed: {0}")]
     Connect(#[from] ConnectError),
 }

@@ -12,7 +12,7 @@ use anubis::api::server::{self, AppState};
 use anubis::config::holder::ConfigHolder;
 use anubis::config::loader::reload;
 use anubis::config::models::ProxyType;
-use anubis::health::store::InMemoryHealthStore;
+use anubis::health::store::{HealthStore, InMemoryHealthStore};
 use anubis::metrics::collector::Metrics;
 use anubis::proxy::listener::Proxy;
 use anubis::shared::error::RouterError;
@@ -110,10 +110,11 @@ async fn run(args: &CliArgs) -> Result<(), RouterError> {
     let config = reload(&args.config)?;
     let holder = Arc::new(ConfigHolder::new(config));
     let metrics = Arc::new(Metrics::new());
+    let health: Arc<dyn HealthStore> = Arc::new(InMemoryHealthStore::new());
     let state = Arc::new(AppState::new(
         Arc::clone(&holder),
         Arc::clone(&metrics),
-        Arc::new(InMemoryHealthStore::new()),
+        Arc::clone(&health),
         args.config.clone(),
     ));
     state.start_health_checks();
@@ -122,7 +123,7 @@ async fn run(args: &CliArgs) -> Result<(), RouterError> {
 
     let proxy_addr = resolve(&config.listen.host, config.listen.port).await?;
     let proxy_listener = Proxy::bind(proxy_addr).await?;
-    let proxy = Proxy::new(Arc::clone(&holder), Arc::clone(&metrics));
+    let proxy = Proxy::new(Arc::clone(&holder), Arc::clone(&metrics), health);
     tokio::spawn(async move {
         if let Err(e) = proxy.serve(proxy_listener).await {
             tracing::error!(target = "proxy", error = %e, "proxy listener failed");

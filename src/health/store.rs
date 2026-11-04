@@ -17,6 +17,12 @@ pub trait HealthStore: Send + Sync {
     /// Snapshot of a proxy's state (None if never checked).
     fn get(&self, name: &str) -> Option<HealthState>;
 
+    /// Whether the most recent check of a proxy failed. A proxy that has not
+    /// been checked yet is *not* down, so routing works during startup.
+    fn is_down(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|s| !s.healthy)
+    }
+
     /// Whether a proxy is currently considered healthy.
     fn is_healthy(&self, name: &str) -> bool {
         self.get(name).is_some_and(|s| s.healthy)
@@ -72,6 +78,16 @@ mod tests {
         let store = InMemoryHealthStore::new();
         assert!(!store.is_healthy("x"));
         assert!(store.get("x").is_none());
+    }
+
+    #[test]
+    fn only_a_failed_check_marks_a_proxy_down() {
+        let store = InMemoryHealthStore::new();
+        assert!(!store.is_down("p"), "unchecked is unknown, not down");
+        store.set_healthy("p", false, None);
+        assert!(store.is_down("p"));
+        store.set_healthy("p", true, Some(1.0));
+        assert!(!store.is_down("p"));
     }
 
     #[test]

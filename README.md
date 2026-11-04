@@ -252,7 +252,7 @@ Client → [Proxy] → (selected upstream) → destination
 3. **Route engine** matches the destination against `rules`.
 4. **Upstream manager** selects a proxy from the matched group using the group's strategy.
 5. **Upstream connector** establishes the connection (Direct, HTTP CONNECT, or SOCKS5).
-6. **Health checker** monitors each proxy's health in the background.
+6. **Health checker** monitors each proxy in the background. If a proxy's last check failed, connections routed to it get an immediate `502` instead of waiting for a timeout (they never fall back to a direct connection). A proxy that has not been checked yet is treated as usable, and it recovers on the next passing check.
 7. **REST API** exposes health and stats at `127.0.0.1:8080`.
 
 ---
