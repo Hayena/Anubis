@@ -63,6 +63,62 @@ async fn spawn_http_proxy(seen: tokio::sync::mpsc::UnboundedSender<String>) -> S
     addr
 }
 
+/// Minimal no-auth SOCKS5 server: accepts CONNECT, reports the requested
+/// `host:port` over `seen`, then echoes with a `socks:` prefix.
+async fn spawn_socks5_proxy(seen: tokio::sync::mpsc::UnboundedSender<String>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let _ = socks5_session(&mut s, seen).await;
+            });
+        }
+    });
+    addr
+}
+
+async fn socks5_session(
+    s: &mut TcpStream,
+    seen: tokio::sync::mpsc::UnboundedSender<String>,
+) -> std::io::Result<()> {
+    let mut greeting = [0u8; 2];
+    s.read_exact(&mut greeting).await?;
+    let mut methods = vec![0u8; greeting[1] as usize];
+    s.read_exact(&mut methods).await?;
+    s.write_all(&[5, 0]).await?;
+
+    let mut head = [0u8; 4];
+    s.read_exact(&mut head).await?;
+    let host = match head[3] {
+        1 => {
+            let mut ip = [0u8; 4];
+            s.read_exact(&mut ip).await?;
+            std::net::Ipv4Addr::from(ip).to_string()
+        }
+        3 => {
+            let len = s.read_u8().await? as usize;
+            let mut name = vec![0u8; len];
+            s.read_exact(&mut name).await?;
+            String::from_utf8_lossy(&name).into_owned()
+        }
+        _ => return Ok(()),
+    };
+    let port = s.read_u16().await?;
+    let _ = seen.send(format!("{host}:{port}"));
+    s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+
+    let mut buf = [0u8; 256];
+    loop {
+        let n = s.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        s.write_all(&[b"socks:", &buf[..n]].concat()).await?;
+    }
+}
+
 async fn start_proxy(holder: Arc<ConfigHolder>, metrics: Arc<Metrics>) -> SocketAddr {
     let listener = Proxy::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -147,6 +203,32 @@ async fn http_upstream_receives_connect_for_the_destination() {
     assert_eq!(reply, b"proxy:hi");
     assert_eq!(seen.recv().await.unwrap(), format!("CONNECT {echo} HTTP/1.1"));
     assert_eq!(metrics.snapshot().proxy_selections.get("up"), Some(&1));
+}
+
+#[tokio::test]
+async fn socks5_upstream_tunnels_to_the_destination() {
+    let echo = spawn_echo("direct:").await;
+    let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = spawn_socks5_proxy(tx).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.conf");
+    std::fs::write(
+        &path,
+        format!(
+            "proxies = [ {{ name = \"up\", type = \"socks5\", host = \"127.0.0.1\", port = {} }} ]\n\
+             default = \"proxy:up\"\n",
+            upstream.port()
+        ),
+    )
+    .unwrap();
+    let holder = Arc::new(ConfigHolder::new(reload(path.to_str().unwrap()).unwrap()));
+    let proxy = start_proxy(holder, Arc::new(Metrics::new())).await;
+
+    let (status, reply) = connect_and_send(proxy, echo, b"yo").await;
+
+    assert!(status.contains("200"), "{status}");
+    assert_eq!(reply, b"socks:yo");
+    assert_eq!(seen.recv().await.unwrap(), echo.to_string());
 }
 
 #[tokio::test]

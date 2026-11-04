@@ -86,80 +86,53 @@ fn parse_proxies(config: &hocon::Config) -> Result<Vec<Proxy>, RouterError> {
 }
 
 fn parse_proxy_value(value: hocon::HoconValue) -> Result<Proxy, RouterError> {
-    let mut name: Option<String> = None;
-    let mut proxy_type: Option<ProxyType> = None;
-    let mut host: Option<String> = None;
-    let mut port: Option<u16> = None;
-    let mut interval: Option<std::time::Duration> = None;
-    let mut timeout: Option<std::time::Duration> = None;
+    let obj = value.as_object().ok_or(ConfigError::MissingProxyName)?;
+    let str_field = |key: &str| obj.get(key).and_then(hocon::HoconValue::as_str);
 
-    if let hocon::HoconValue::Object(map) = value {
-        for (key, v) in map {
-            match key.as_str() {
-                "name" => name = v.as_str().map(|s| s.to_string()),
-                "type" => proxy_type = parse_proxy_type(v),
-                "host" => host = v.as_str().map(|s| s.to_string()),
-                "port" => {
-                    if let Some(p) = v.as_i64() {
-                        port = Some(valid_port("proxies[].port", p)?);
-                    }
-                }
-                "health" => {
-                    if let hocon::HoconValue::Object(hmap) = v {
-                        for (hk, hv) in hmap {
-                            match hk.as_str() {
-                                "interval" => {
-                                    if let Some(s) = hv.as_i64() {
-                                        if s > 0 {
-                                            interval = Some(std::time::Duration::from_secs(s as u64));
-                                        }
-                                    }
-                                }
-                                "timeout" => {
-                                    if let Some(s) = hv.as_i64() {
-                                        if s > 0 {
-                                            timeout = Some(std::time::Duration::from_secs(s as u64));
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else {
-                        return Err(ConfigError::InvalidHealthConfig.into());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let name = name.ok_or(ConfigError::MissingProxyName)?;
-    let proxy_type = proxy_type.ok_or(ConfigError::MissingProxyType)?;
-    let host = host.ok_or(ConfigError::MissingProxyHost)?;
-    let port = port.ok_or(ConfigError::MissingProxyPort)?;
+    let name = str_field("name").ok_or(ConfigError::MissingProxyName)?;
+    let proxy_type = parse_proxy_type(str_field("type").ok_or(ConfigError::MissingProxyType)?)?;
+    let host = str_field("host").ok_or(ConfigError::MissingProxyHost)?;
+    let port = obj
+        .get("port")
+        .and_then(hocon::HoconValue::as_i64)
+        .ok_or(ConfigError::MissingProxyPort)
+        .map_err(RouterError::from)
+        .and_then(|p| valid_port("proxies[].port", p))?;
+    let health = obj
+        .get("health")
+        .map_or(Ok(HealthConfig::default()), parse_health)?;
 
     Ok(Proxy {
-        name,
+        name: name.to_string(),
         r#type: proxy_type,
-        host,
+        host: host.to_string(),
         port,
-        health: HealthConfig {
-            interval: interval.unwrap_or_else(|| std::time::Duration::from_secs(30)),
-            timeout: timeout.unwrap_or_else(|| std::time::Duration::from_secs(5)),
-        },
+        health,
     })
 }
 
-fn parse_proxy_type(value: hocon::HoconValue) -> Option<ProxyType> {
-    match value.as_str() {
-        Some("http") => Some(ProxyType::Http),
-        Some("socks5") => Some(ProxyType::Socks5),
-        Some(t) => {
-            tracing::warn!(target = "config", "Unknown proxy type: {}", t);
-            None
-        }
-        None => None,
+/// Health settings in whole seconds; non-positive or missing values fall
+/// back to the defaults.
+fn parse_health(value: &hocon::HoconValue) -> Result<HealthConfig, RouterError> {
+    let obj = value.as_object().ok_or(ConfigError::InvalidHealthConfig)?;
+    let secs = |key: &str, default: std::time::Duration| {
+        obj.get(key)
+            .and_then(hocon::HoconValue::as_i64)
+            .filter(|s| *s > 0)
+            .map_or(default, |s| std::time::Duration::from_secs(s.unsigned_abs()))
+    };
+    let defaults = HealthConfig::default();
+    Ok(HealthConfig {
+        interval: secs("interval", defaults.interval),
+        timeout: secs("timeout", defaults.timeout),
+    })
+}
+
+fn parse_proxy_type(value: &str) -> Result<ProxyType, RouterError> {
+    match value {
+        "http" => Ok(ProxyType::Http),
+        "socks5" => Ok(ProxyType::Socks5),
+        other => Err(ConfigError::Validation(format!("unknown proxy type: {other}")).into()),
     }
 }
 
@@ -174,36 +147,35 @@ fn parse_rules(config: &hocon::Config) -> Result<Vec<Rule>, RouterError> {
 }
 
 fn parse_rule_value(value: hocon::HoconValue) -> Result<Rule, RouterError> {
-    let mut conditions = Vec::new();
-    let mut route: Option<RuleTarget> = None;
-
-    if let hocon::HoconValue::Object(map) = value {
-        for (key, v) in map {
-            match (key.as_str(), v.as_str()) {
-                ("domain", Some(d)) => conditions.push(Condition::Domain(d.to_string())),
-                ("host", Some(h)) => conditions.push(Condition::Host(h.to_string())),
-                ("cidr", Some(c)) => {
-                    let net = c
-                        .parse()
-                        .map_err(|e| ConfigError::Validation(format!("invalid cidr '{c}': {e}")))?;
-                    conditions.push(Condition::Cidr(net));
-                }
-                ("route", _) => route = parse_route_value(v),
-                _ => {}
-            }
-        }
-    }
-
-    let rule = Rule {
-        conditions,
-        route: route.ok_or(ConfigError::MissingRoute)?,
+    let obj = value.as_object();
+    let str_field = |key: &str| {
+        obj.and_then(|o| o.get(key))
+            .and_then(hocon::HoconValue::as_str)
     };
+
+    let cidr = str_field("cidr")
+        .map(|c| {
+            c.parse()
+                .map(Condition::Cidr)
+                .map_err(|e| ConfigError::Validation(format!("invalid cidr '{c}': {e}")))
+        })
+        .transpose()?;
+    let conditions = str_field("domain")
+        .map(|d| Condition::Domain(d.to_string()))
+        .into_iter()
+        .chain(str_field("host").map(|h| Condition::Host(h.to_string())))
+        .chain(cidr)
+        .collect();
+
+    let route = obj
+        .and_then(|o| o.get("route"))
+        .and_then(hocon::HoconValue::as_str)
+        .and_then(parse_target)
+        .ok_or(ConfigError::MissingRoute)?;
+
+    let rule = Rule { conditions, route };
     validate_rule(&rule).map_err(ConfigError::Validation)?;
     Ok(rule)
-}
-
-fn parse_route_value(value: hocon::HoconValue) -> Option<RuleTarget> {
-    value.as_str().and_then(parse_target)
 }
 
 fn parse_target(s: &str) -> Option<RuleTarget> {
@@ -241,4 +213,71 @@ fn parse_default_rule(config: &hocon::Config) -> Result<RuleTarget, RouterError>
         .unwrap_or_else(|| "direct".to_string());
     parse_target(&default_str)
         .ok_or_else(|| ConfigError::Validation(format!("invalid default rule '{default_str}'")).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROXY: &str = r#"proxies = [{ name = "p", type = "http", host = "h", port = 8080 }]"#;
+
+    fn err(content: &str) -> String {
+        parse_hocon(content).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn parses_full_config_with_defaults() {
+        let cfg = parse_hocon(&format!(
+            r#"{PROXY}
+            rules = [
+              {{ domain = "*.a.com", host = "b.org", cidr = "10.0.0.0/8", route = "proxy:p" }},
+              {{ route = "direct" }}
+            ]
+            default = "p""#
+        ))
+        .unwrap();
+
+        assert_eq!(cfg.listen.port, 3128);
+        assert_eq!(cfg.api.port, 8080);
+        assert_eq!(cfg.proxies[0].health.interval.as_secs(), 30);
+        assert_eq!(cfg.rules[0].conditions.len(), 3);
+        assert!(cfg.rules[1].conditions.is_empty());
+        assert_eq!(cfg.default, RuleTarget::Proxy("p".into()));
+    }
+
+    #[test]
+    fn health_overrides_apply_and_non_positive_fall_back() {
+        let cfg = parse_hocon(
+            r#"proxies = [{ name = "p", type = "socks5", host = "h", port = 1,
+                           health { interval = 7, timeout = 0 } }]"#,
+        )
+        .unwrap();
+        let h = &cfg.proxies[0].health;
+        assert_eq!((h.interval.as_secs(), h.timeout.as_secs()), (7, 5));
+    }
+
+    #[test]
+    fn rejects_invalid_proxies() {
+        assert!(err(r#"proxies = [{ type = "http", host = "h", port = 1 }]"#).contains("proxy name"));
+        assert!(err(r#"proxies = [{ name = "p", type = "ftp", host = "h", port = 1 }]"#).contains("ftp"));
+        assert!(err(r#"proxies = [{ name = "p", type = "http", host = "h", port = 70000 }]"#).contains("out of range"));
+        assert!(err(r#"proxies = [{ name = "p", type = "http", host = "h", port = 1, health = 5 }]"#).contains("health"));
+    }
+
+    #[test]
+    fn rejects_bad_rules_and_references() {
+        assert!(err(r#"rules = [{ cidr = "10.0.0.0/99", route = "direct" }]"#).contains("cidr"));
+        assert!(err(r#"rules = [{ domain = "*.a.com" }]"#).contains("route"));
+        assert!(err(r#"rules = [{ domain = "*.a.com", route = "ghost" }]"#).contains("ghost"));
+        assert!(err(r#"default = "group:""#).contains("invalid default"));
+    }
+
+    #[test]
+    fn route_targets_parse_all_forms() {
+        assert_eq!(parse_target("DIRECT"), Some(RuleTarget::Direct));
+        assert_eq!(parse_target("proxy:a"), Some(RuleTarget::Proxy("a".into())));
+        assert_eq!(parse_target("group:g"), Some(RuleTarget::Proxy("g".into())));
+        assert_eq!(parse_target("bare"), Some(RuleTarget::Proxy("bare".into())));
+        assert_eq!(parse_target("weird:x"), None);
+    }
 }

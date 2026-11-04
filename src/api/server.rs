@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+#[cfg(test)]
+use std::time::UNIX_EPOCH;
 use axum::{
     routing::get,
     routing::post,
@@ -158,41 +160,23 @@ async fn reload_handler(
 
 // --- timer helpers ---
 
-fn to_iso8601(epoch_seconds: u64) -> String {
-    let days = epoch_seconds / 86400;
-    let sec_of_day = (epoch_seconds % 86400) as u32;
-    let z = days as i64 + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, m, d, sec_of_day / 3600, (sec_of_day % 3600) / 60, sec_of_day % 60
-    )
-}
-
 fn to_iso(opt: Option<SystemTime>) -> Option<String> {
-    opt.map(|t| {
-        let s = t
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        to_iso8601(s)
-    })
+    opt.map(format_rfc3339)
 }
 
 fn now_iso8601() -> String {
-    let since = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    to_iso8601(since)
+    format_rfc3339(SystemTime::now())
+}
+
+/// UTC timestamp truncated to whole seconds, e.g. `2026-11-04T20:07:22Z`.
+fn format_rfc3339(t: SystemTime) -> String {
+    use time::format_description::well_known::Rfc3339;
+
+    time::OffsetDateTime::from(t)
+        .replace_nanosecond(0)
+        .ok()
+        .and_then(|dt| dt.format(&Rfc3339).ok())
+        .unwrap_or_default()
 }
 
 // --- router ---
@@ -204,4 +188,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/stats", get(stats_handler))
         .route("/reload", post(reload_handler))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn formats_epoch_seconds_as_utc() {
+        assert_eq!(format_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        let t = UNIX_EPOCH + Duration::from_millis(1_793_823_142_987);
+        assert_eq!(format_rfc3339(t), "2026-11-04T20:12:22Z");
+    }
 }
