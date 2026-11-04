@@ -51,7 +51,7 @@ The server binds:
 | Port | Protocol | Description |
 |---|---|---|
 | `8080` | REST API | Health, config, stats |
-| `4001` | Forward proxy | HTTP CONNECT proxy listener |
+| `4001` | Forward proxy | HTTP proxy listener (`CONNECT` for HTTPS, absolute-form for plain HTTP) |
 
 ---
 
@@ -247,7 +247,7 @@ Client → [Proxy] → (selected upstream) → destination
           └── Health check (per-proxy)
 ```
 
-1. **Client** connects to Anubis (port 4001) and sends a `CONNECT` request.
+1. **Client** connects to Anubis (port 4001) and sends a `CONNECT` request (HTTPS) or an absolute-form request such as `GET http://host/path` (plain HTTP). Plain-HTTP requests are rewritten to origin-form and sent with `Connection: close`, one request per connection. Anything else gets a `400`.
 2. **Proxy listener** receives the connection and routes it.
 3. **Route engine** matches the destination against `rules`.
 4. **Upstream manager** selects a proxy from the matched group using the group's strategy.

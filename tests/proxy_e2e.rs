@@ -214,6 +214,91 @@ async fn http_upstream_receives_connect_for_the_destination() {
     assert_eq!(metrics.snapshot().proxy_selections.get("up"), Some(&1));
 }
 
+/// HTTP origin that answers every request with `200` and the request it
+/// received (head plus `Content-Length` body) as the response body.
+async fn spawn_http_origin() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut req = Vec::new();
+                let head_end = loop {
+                    if let Some(i) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                    let mut chunk = [0u8; 512];
+                    match s.read(&mut chunk).await {
+                        Ok(n) if n > 0 => req.extend_from_slice(&chunk[..n]),
+                        _ => return,
+                    }
+                };
+                let head = String::from_utf8_lossy(&req[..head_end]).to_lowercase();
+                let body_len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while req.len() < head_end + body_len {
+                    let mut chunk = [0u8; 512];
+                    match s.read(&mut chunk).await {
+                        Ok(n) if n > 0 => req.extend_from_slice(&chunk[..n]),
+                        _ => return,
+                    }
+                }
+                let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", req.len());
+                let _ = s.write_all(reply.as_bytes()).await;
+                let _ = s.write_all(&req).await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn plain_http_request_is_forwarded_in_origin_form_with_its_body() {
+    let origin = spawn_http_origin().await;
+    let metrics = Arc::new(Metrics::new());
+    let holder = Arc::new(ConfigHolder::new(config(vec![], RuleTarget::Direct)));
+    let proxy = start_proxy(holder, Arc::clone(&metrics)).await;
+
+    let mut s = TcpStream::connect(proxy).await.unwrap();
+    s.write_all(
+        format!(
+            "POST http://{origin}/submit?a=1 HTTP/1.1\r\nHost: {origin}\r\nProxy-Connection: keep-alive\r\n\
+             Content-Length: 5\r\n\r\nhello"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut response = String::new();
+    s.read_to_string(&mut response).await.unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let echoed = response.split("\r\n\r\n").skip(1).collect::<Vec<_>>().join("\r\n\r\n");
+    assert_eq!(
+        echoed,
+        format!(
+            "POST /submit?a=1 HTTP/1.1\r\nHost: {origin}\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
+        )
+    );
+    assert_eq!(metrics.snapshot().connections_opened, 1);
+}
+
+#[tokio::test]
+async fn unsupported_request_gets_400_instead_of_a_silent_close() {
+    let holder = Arc::new(ConfigHolder::new(config(vec![], RuleTarget::Direct)));
+    let proxy = start_proxy(holder, Arc::new(Metrics::new())).await;
+
+    let mut s = TcpStream::connect(proxy).await.unwrap();
+    s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+    let mut response = String::new();
+    s.read_to_string(&mut response).await.unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+}
+
 /// Holder whose default route is a SOCKS5 upstream named `up` at `upstream`.
 fn socks_holder(upstream: SocketAddr) -> Arc<ConfigHolder> {
     let dir = tempfile::tempdir().unwrap();

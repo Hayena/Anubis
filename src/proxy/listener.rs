@@ -104,8 +104,8 @@ impl Proxy {
     }
 }
 
-/// Handle a single client connection: read the CONNECT head, route the
-/// destination, connect upstream, acknowledge, and tunnel bidirectionally.
+/// Handle a single client connection: read the request head (CONNECT or
+/// plain HTTP), route the destination, connect upstream, and relay bytes.
 async fn handle_client(
     mut stream: TcpStream,
     config: &ConfigHolder,
@@ -113,16 +113,25 @@ async fn handle_client(
     health: &dyn HealthStore,
 ) -> Result<(), ClientError> {
     let (head, leftover) = read_head(&mut stream).await?;
-    let dest = request::parse_connect(&head)?;
+    let request = match request::parse_request(&head) {
+        Ok(request) => request,
+        Err(e) => {
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            return Err(e.into());
+        }
+    };
+    let dest = request.destination();
     tracing::debug!("client -> route: {}:{}", dest.host(), dest.port());
 
     // One snapshot per connection keeps engine and connectors consistent.
     let snapshot = config.snapshot();
-    let decision = snapshot.engine.select(&dest);
+    let decision = snapshot.engine.select(dest);
     if let RoutingDecision::ViaProxy(name) = &decision {
         metrics.record_selection(name);
     }
-    let mut conn = match connect_upstream(&decision, &dest, &snapshot.manager, health).await {
+    let mut conn = match connect_upstream(&decision, dest, &snapshot.manager, health).await {
         Ok(conn) => conn,
         Err(e) => {
             metrics.increment_failed();
@@ -135,11 +144,24 @@ async fn handle_client(
     metrics.increment_opened();
     let _active = ActiveGuard::new(Arc::clone(metrics));
 
-    stream
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .map_err(ClientError::io("write response"))?;
-    // Bytes the client sent right after the head belong to the tunnel.
+    // The tunnel is acknowledged to the client; a forwarded request is
+    // instead replayed to the origin (the origin's reply is relayed as is).
+    let sent_head = match &request {
+        request::Request::Connect(_) => {
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .map_err(ClientError::io("write response"))?;
+            0
+        }
+        request::Request::Forward(forward) => {
+            conn.write_all(forward.head.as_bytes())
+                .await
+                .map_err(ClientError::io("forward request head"))?;
+            forward.head.len() as u64
+        }
+    };
+    // Bytes the client sent right after the head (e.g. a request body).
     if !leftover.is_empty() {
         conn.write_all(&leftover)
             .await
@@ -149,7 +171,7 @@ async fn handle_client(
     let (to_upstream, from_upstream) = tokio::io::copy_bidirectional(&mut stream, &mut conn)
         .await
         .map_err(ClientError::io("tunnel"))?;
-    metrics.add_bytes(from_upstream, to_upstream + leftover.len() as u64);
+    metrics.add_bytes(from_upstream, to_upstream + leftover.len() as u64 + sent_head);
     tracing::debug!("tunnel complete: client->conn {to_upstream} bytes, conn->client {from_upstream} bytes");
     Ok(())
 }
