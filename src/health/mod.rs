@@ -1,5 +1,4 @@
-//! Health monitoring: background checker, latency, state storage.
+//! Health monitoring: background checker, state storage.
 
 pub mod checker;
-pub mod latency;
 pub mod store;
