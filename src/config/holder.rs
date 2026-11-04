@@ -5,21 +5,25 @@ use std::sync::{Arc, PoisonError, RwLock};
 use crate::config::loader;
 use crate::config::models::Config;
 use crate::routing::engine::RouteEngine;
+use crate::upstream::manager::UpstreamManager;
 use crate::shared::error::RouterError;
 
-/// An immutable config + route engine pair. Always swapped as one unit, so
-/// readers never observe a config with a mismatched engine.
+/// An immutable config + route engine + upstream connectors. Always swapped
+/// as one unit, so readers never observe a mismatched combination.
 pub struct Snapshot {
     pub config: Arc<Config>,
     pub engine: Arc<RouteEngine>,
+    pub manager: Arc<UpstreamManager>,
 }
 
 impl Snapshot {
     fn build(config: Config) -> Arc<Self> {
         let engine = Arc::new(RouteEngine::new(config.rules.clone(), config.default.clone()));
+        let manager = Arc::new(UpstreamManager::from_proxies(&config.proxies));
         Arc::new(Self {
             config: Arc::new(config),
             engine,
+            manager,
         })
     }
 }

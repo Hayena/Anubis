@@ -1,3 +1,3 @@
-//! REST API module (Milestone 7).
+//! REST API module.
 
 pub mod server;

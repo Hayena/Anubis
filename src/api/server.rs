@@ -1,4 +1,4 @@
-//! REST API server (Milestone 7).
+//! REST API server.
 
 use std::sync::Arc;
 
@@ -12,7 +12,10 @@ use axum::{
 };
 
 use crate::config::holder::ConfigHolder;
+use crate::config::models::Config;
 use crate::health::store::HealthStore;
+use crate::health::supervisor::HealthSupervisor;
+use crate::shared::error::RouterError;
 use crate::metrics::collector::{Metrics, MetricsSnapshot};
 use axum::http::StatusCode;
 
@@ -23,6 +26,7 @@ pub struct AppState {
     pub config_path: String,
     pub metrics: Arc<Metrics>,
     pub health: Arc<dyn HealthStore>,
+    supervisor: HealthSupervisor,
 }
 
 impl AppState {
@@ -36,8 +40,22 @@ impl AppState {
             config,
             config_path,
             metrics,
+            supervisor: HealthSupervisor::new(Arc::clone(&health)),
             health,
         }
+    }
+
+    /// Start (or restart) the health checkers for the current config.
+    pub fn start_health_checks(&self) {
+        self.supervisor.apply(&self.config.current_config());
+    }
+
+    /// Reload the startup config file: swap routing state and connectors,
+    /// then restart health checkers. On error the old state keeps running.
+    pub fn reload(&self) -> Result<Arc<Config>, RouterError> {
+        let config = self.config.reload(&self.config_path)?;
+        self.supervisor.apply(&config);
+        Ok(config)
     }
 }
 
@@ -117,7 +135,7 @@ struct ErrorResponse {
 async fn reload_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ReloadResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.config.reload(&state.config_path) {
+    match state.reload() {
         Ok(new_config) => {
             let summary = serde_json::json!({
                 "reloaded": true,

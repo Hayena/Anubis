@@ -3,6 +3,7 @@
 // A local forward proxy with adaptive routing.
 // Library root: re-exports shared types, public crates.
 
+pub mod api;
 pub mod config;
 pub mod health;
 pub mod metrics;

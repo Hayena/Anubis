@@ -10,7 +10,7 @@ use crate::metrics::collector::Metrics;
 use crate::proxy::connect::connect_upstream;
 use crate::routing::decision::RoutingDecision;
 use crate::proxy::request;
-use crate::upstream::manager::UpstreamManager;
+use crate::shared::error::RouterError;
 
 /// Upper bound for the client's request head.
 const MAX_HEAD_BYTES: usize = 8 * 1024;
@@ -22,8 +22,32 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// hot-reloaded rules apply to new connections immediately.
 pub struct Proxy {
     config: Arc<ConfigHolder>,
-    manager: Arc<UpstreamManager>,
     metrics: Arc<Metrics>,
+}
+
+/// Why a client connection ended abnormally.
+#[derive(Debug, thiserror::Error)]
+enum ClientError {
+    #[error("{context}: {source}")]
+    Io {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("bad request: {0}")]
+    BadRequest(#[from] request::ParseError),
+    #[error("request head too large")]
+    HeadTooLarge,
+    #[error("connection closed before request head completed")]
+    ClosedEarly,
+    #[error(transparent)]
+    Upstream(#[from] RouterError),
+}
+
+impl ClientError {
+    fn io(context: &'static str) -> impl FnOnce(std::io::Error) -> Self {
+        move |source| Self::Io { context, source }
+    }
 }
 
 /// Keeps the active-connection gauge correct on every exit path.
@@ -43,31 +67,25 @@ impl Drop for ActiveGuard {
 }
 
 impl Proxy {
-    pub fn new(config: Arc<ConfigHolder>, manager: Arc<UpstreamManager>, metrics: Arc<Metrics>) -> Self {
-        Self {
-            config,
-            manager,
-            metrics,
-        }
+    pub fn new(config: Arc<ConfigHolder>, metrics: Arc<Metrics>) -> Self {
+        Self { config, metrics }
     }
 
-    /// Bind the proxy to `addr`, accept clients, and handle each connection.
-    pub async fn bind(&self, addr: std::net::SocketAddr) -> Result<(), String> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("proxy bind failed on {addr}: {e}"))?;
-        tracing::info!("proxy listener bound: {addr}");
+    /// Bind a listener on `addr` (use port 0 for an ephemeral port).
+    pub async fn bind(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+        let listener = TcpListener::bind(addr).await?;
+        tracing::info!("proxy listener bound: {}", listener.local_addr()?);
+        Ok(listener)
+    }
 
+    /// Accept clients on `listener` and handle each connection until accept fails.
+    pub async fn serve(&self, listener: TcpListener) -> std::io::Result<()> {
         loop {
-            let (stream, _peer) = listener
-                .accept()
-                .await
-                .map_err(|e| format!("accept failed: {e}"))?;
+            let (stream, _peer) = listener.accept().await?;
             let config = Arc::clone(&self.config);
-            let manager = Arc::clone(&self.manager);
             let metrics = Arc::clone(&self.metrics);
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, &config, &manager, &metrics).await {
+                if let Err(e) = handle_client(stream, &config, &metrics).await {
                     tracing::warn!("client connection failed: {e}");
                 }
             });
@@ -80,25 +98,26 @@ impl Proxy {
 async fn handle_client(
     mut stream: TcpStream,
     config: &ConfigHolder,
-    manager: &UpstreamManager,
     metrics: &Arc<Metrics>,
-) -> Result<(), String> {
+) -> Result<(), ClientError> {
     let (head, leftover) = read_head(&mut stream).await?;
-    let dest = request::parse_connect(&head).map_err(|e| e.to_string())?;
+    let dest = request::parse_connect(&head)?;
     tracing::debug!("client -> route: {}:{}", dest.host(), dest.port());
 
-    let decision = config.current_engine().select(&dest);
+    // One snapshot per connection keeps engine and connectors consistent.
+    let snapshot = config.snapshot();
+    let decision = snapshot.engine.select(&dest);
     if let RoutingDecision::ViaProxy(name) = &decision {
         metrics.record_selection(name);
     }
-    let mut conn = match connect_upstream(&decision, &dest, manager).await {
+    let mut conn = match connect_upstream(&decision, &dest, &snapshot.manager).await {
         Ok(conn) => conn,
         Err(e) => {
             metrics.increment_failed();
             let _ = stream
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 .await;
-            return Err(e.to_string());
+            return Err(e.into());
         }
     };
     metrics.increment_opened();
@@ -107,17 +126,17 @@ async fn handle_client(
     stream
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
-        .map_err(|e| format!("write response: {e}"))?;
+        .map_err(ClientError::io("write response"))?;
     // Bytes the client sent right after the head belong to the tunnel.
     if !leftover.is_empty() {
         conn.write_all(&leftover)
             .await
-            .map_err(|e| format!("forward early data: {e}"))?;
+            .map_err(ClientError::io("forward early data"))?;
     }
 
     let (to_upstream, from_upstream) = tokio::io::copy_bidirectional(&mut stream, &mut conn)
         .await
-        .map_err(|e| format!("tunnel: {e}"))?;
+        .map_err(ClientError::io("tunnel"))?;
     metrics.add_bytes(from_upstream, to_upstream + leftover.len() as u64);
     tracing::debug!("tunnel complete: client->conn {to_upstream} bytes, conn->client {from_upstream} bytes");
     Ok(())
@@ -125,7 +144,7 @@ async fn handle_client(
 
 /// Read until the end of the request head (`\r\n\r\n`). Returns the head text
 /// and any bytes received after it.
-async fn read_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), String> {
+async fn read_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), ClientError> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     loop {
@@ -134,14 +153,14 @@ async fn read_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>), String> 
             return Ok((String::from_utf8_lossy(&buf).into_owned(), leftover));
         }
         if buf.len() >= MAX_HEAD_BYTES {
-            return Err("request head too large".to_string());
+            return Err(ClientError::HeadTooLarge);
         }
         let n = stream
             .read(&mut chunk)
             .await
-            .map_err(|e| format!("read request: {e}"))?;
+            .map_err(ClientError::io("read request"))?;
         if n == 0 {
-            return Err("connection closed before request head completed".to_string());
+            return Err(ClientError::ClosedEarly);
         }
         buf.extend_from_slice(&chunk[..n]);
     }

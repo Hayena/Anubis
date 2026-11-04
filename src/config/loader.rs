@@ -9,17 +9,7 @@ use crate::config::models::{Api, Condition, Config, HealthConfig, Listen, Proxy,
 use crate::routing::matcher::validate_rule;
 use crate::shared::error::{ConfigError, RouterError};
 
-/// Load configuration from a HOCON file.
-pub async fn load(path: &str, watch: bool) -> Result<Config, RouterError> {
-    info!(target = "config", "Loading config from {}", path);
-    let config = reload(path)?;
-    if watch {
-        info!(target = "config", "Watching config file for changes (hot reload)");
-    }
-    Ok(config)
-}
-
-/// Programmatic reload of configuration (Milestone 8 hot reload).
+/// Load configuration from a HOCON file (also used for hot reload).
 ///
 /// Reads the HOCON file, parses it, validates it, and returns the new
 /// `Config`. The caller owns swapping the `Arc<Config>` and rebuilding the

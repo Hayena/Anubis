@@ -1,335 +1,169 @@
-// Adaptive Multi-Proxy Router
-
+// Anubis: local forward proxy with adaptive routing.
 //
-
-// Local forward proxy with adaptive routing.
-
 // Entry point: CLI parse -> config load/validate -> component wiring ->
-
 // graceful shutdown.
 
-
-
-mod api;
-
-mod config;
-
-mod health;
-
-mod metrics;
-
-mod proxy;
-
-mod routing;
-
-mod shared;
-
-mod upstream;
-
-
-
-use std::net::ToSocketAddrs;
-
-
+use std::process::ExitCode;
 use std::sync::Arc;
 
+use clap::{Parser, Subcommand, ValueEnum};
 
+use anubis::api::server::{self, AppState};
+use anubis::config::holder::ConfigHolder;
+use anubis::config::loader::reload;
+use anubis::config::models::ProxyType;
+use anubis::health::store::InMemoryHealthStore;
+use anubis::metrics::collector::Metrics;
+use anubis::proxy::listener::Proxy;
+use anubis::shared::error::RouterError;
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LogLevel {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
 
-use clap::{Parser, Subcommand};
-
-
-use config::loader::{load, reload};
-
-use config::models::ProxyType;
-
-use health::store::InMemoryHealthStore;
-
-use metrics::collector::Metrics;
-
-
-
-use shared::error::RouterError;
-
-use upstream::manager::UpstreamManager;
-
-use upstream::traits::UpstreamConnector;
-
-
+impl LogLevel {
+    fn as_filter(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "anubis", version = "0.1.0", about = "Local forward proxy with adaptive routing")]
+#[command(name = "anubis", version, about = "Local forward proxy with adaptive routing")]
 struct CliArgs {
     #[command(subcommand)]
     command: Option<Commands>,
 
     /// Path to HOCON config file
-
-    #[arg(long, default_value = "proxy.conf")]
-
+    #[arg(short, long, default_value = "proxy.conf")]
     config: String,
 
-
-
     /// Watch config file for changes (hot reload)
-
-    #[arg(long)]
-
+    #[arg(short, long)]
     watch: bool,
 
-
-
-    /// Log level (off, error, warn, info, debug, trace)
-
-    #[arg(long, default_value = "info")]
-
-    log_level: String,
-
+    /// Log level
+    #[arg(short, long, value_enum, default_value_t = LogLevel::Info)]
+    log_level: LogLevel,
 }
 
-
-
 #[derive(Subcommand, Debug)]
-pub enum Commands {
+enum Commands {
     /// Start the proxy server (default)
     Start,
     /// Configuration inspection
     #[command(subcommand)]
     Config(ConfigCommands),
 }
+
 #[derive(Subcommand, Debug)]
-pub enum ConfigCommands {
+enum ConfigCommands {
     /// Print the resolved configuration (validated)
     Print,
     /// Validate the configuration and report any errors
     Validate,
 }
 
-async fn run_config_validate(config_path: &str) -> Result<(), RouterError> {
-    // Use reload() which already validates the HOCON
-    reload(config_path)?;
-    println!("Config is valid: {}", config_path);
-    Ok(())
-}
-
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let args = CliArgs::parse();
 
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(&args.log_level))
+        .with_env_filter(tracing_subscriber::EnvFilter::new(args.log_level.as_filter()))
         .init();
 
+    let result = match &args.command {
+        Some(Commands::Config(ConfigCommands::Print)) => run_config_print(&args.config),
+        Some(Commands::Config(ConfigCommands::Validate)) => run_config_validate(&args.config),
+        Some(Commands::Start) | None => run(&args).await,
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(target = "router", error = %e, "command failed");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: &CliArgs) -> Result<(), RouterError> {
     tracing::info!(
         target = "router",
         config = %args.config,
         watch = args.watch,
-        log_level = %args.log_level,
-        "Starting Adaptive Multi-Proxy Router"
+        "Starting Anubis"
     );
 
-    match args.command {
-        Some(Commands::Start) | None => {
-            if let Err(e) = run(args).await {
-                tracing::error!(target = "router", error = %e, "Startup failed");
-                std::process::exit(1);
-            }
-        }
-        Some(Commands::Config(ConfigCommands::Print)) => {
-            if let Err(e) = run_config_print(&args.config) {
-                tracing::error!(target = "router", error = %e, "config print failed");
-                std::process::exit(1);
-            }
-            return;
-        }
-        Some(Commands::Config(ConfigCommands::Validate)) => {
-            if let Err(e) = run_config_validate(&args.config).await {
-                tracing::error!(target = "router", error = %e, "config validate failed");
-                std::process::exit(1);
-            }
-            return;
-        }
-    }
-}
-
-async fn run(args: CliArgs) -> Result<(), RouterError> {
-
-    // Milestone 1: Configuration loading.
-
-    tracing::info!(target = "router", "Milestone 1: Configuration loading");
-
-    let config = load(&args.config, args.watch).await?;
-
-
-
-    // Milestone 2: Core route engine, held in a swappable `ConfigHolder`.
-
-    let config_holder = Arc::new(config::holder::ConfigHolder::new(config));
-
-
-    let config = config_holder.current_config();
-
-
-
-    // Milestone 7: health store, metrics collector, upstream manager, API.
-
+    let config = reload(&args.config)?;
+    let holder = Arc::new(ConfigHolder::new(config));
     let metrics = Arc::new(Metrics::new());
-
-    let health = Arc::new(InMemoryHealthStore::new());
-
-    let mut manager = UpstreamManager::new();
-
-
-
-    // Register proxies and start health checkers.
-
-    for proxy in &config.proxies {
-
-        let connector = match proxy.r#type {
-
-            ProxyType::Http => std::sync::Arc::new(
-
-                upstream::http::HttpProxyConnector::new(&proxy.host, proxy.port),
-
-            ) as std::sync::Arc<dyn UpstreamConnector>,
-
-            ProxyType::Socks5 => std::sync::Arc::new(
-
-                upstream::socks5::Socks5Upstream::new(&proxy.host, proxy.port),
-
-            ) as std::sync::Arc<dyn UpstreamConnector>,
-
-        };
-
-        manager.register(proxy.name.clone(), connector);
-
-
-
-        let checker = health::checker::HealthChecker::new(
-
-            proxy.name.clone(),
-
-            proxy.host.clone(),
-
-            proxy.port,
-
-            proxy.health.interval,
-
-            proxy.health.timeout,
-
-            health.clone(),
-
-        );
-
-        tokio::spawn(async move { checker.run().await });
-
-        tracing::info!(target = "health", proxy = %proxy.name, "health checker started");
-
-    }
-
-
-
-    // Proxy groups have been removed; no group registration needed.
-
-    // Milestone 3 (direct transport) + proxy request routing:
-
-    // start the TCP forward proxy on the configured listen address.
-
-    // Compute the listen address and proxy BEFORE moving config_holder into
-
-    // the AppState (ConfigHolder is not Clone).
-
-    let listen = config_holder.current_config().as_ref().listen.clone();
-
-    let manager_arc = Arc::new(manager);
-
-    let proxy = proxy::listener::Proxy::new(
-
-        Arc::clone(&config_holder),
-
-        manager_arc.clone(),
-
+    let state = Arc::new(AppState::new(
+        Arc::clone(&holder),
         Arc::clone(&metrics),
+        Arc::new(InMemoryHealthStore::new()),
+        args.config.clone(),
+    ));
+    state.start_health_checks();
 
-    );
+    let config = holder.current_config();
 
-    let listen_addr = (listen.host.as_str(), listen.port)
-
-        .to_socket_addrs()
-
-        .map_err(|e| RouterError::Io(std::io::Error::other(format!("resolve proxy listen: {e}"))))?
-
-        .next()
-
-        .ok_or_else(|| RouterError::Io(std::io::Error::other("empty proxy listen address")))?;
-
+    let proxy_addr = resolve(&config.listen.host, config.listen.port).await?;
+    let proxy_listener = Proxy::bind(proxy_addr).await?;
+    let proxy = Proxy::new(Arc::clone(&holder), Arc::clone(&metrics));
     tokio::spawn(async move {
-        if let Err(e) = proxy.bind(listen_addr).await {
+        if let Err(e) = proxy.serve(proxy_listener).await {
             tracing::error!(target = "proxy", error = %e, "proxy listener failed");
         }
     });
-    tracing::info!(target = "proxy", bind = %listen_addr, "M3 direct transport proxy started");
-
-    // Build shared API state with swappable config (Milestone 8).
-
-    let state = Arc::new(api::server::AppState::new(
-        Arc::clone(&config_holder),
-        Arc::clone(&metrics),
-        health.clone(),
-        args.config.clone(),
-    ));
-
-
-
-    // Milestone 8: config file watcher (hot reload).
 
     if args.watch {
-
-        let state_watch = state.clone();
-
-        let path_watch = args.config.clone();
-
-        tokio::spawn(watch_config_file(path_watch, state_watch));
-
+        tokio::spawn(watch_config_file(args.config.clone(), Arc::clone(&state)));
     }
 
-
-
-    // Milestone 7: start the REST API on the configured API host:API port.
-
-    let api_addr = format!("{}:{}", config.api.host, config.api.port);
-
-    let listener = tokio::net::TcpListener::bind(&api_addr).await.map_err(|e| {
-
-        RouterError::Io(std::io::Error::other(format!("bind api: {e}")))
-
-    })?;
-
+    let api_addr = resolve(&config.api.host, config.api.port).await?;
+    let api_listener = tokio::net::TcpListener::bind(api_addr).await?;
     tracing::info!(target = "router", bind = %api_addr, "REST API listening");
 
-
-
-    axum::serve(listener, api::server::router(state)).await.map_err(|e| {
-
-        RouterError::Io(std::io::Error::other(format!("api serve: {e}")))
-
-    })?;
-
-
-
+    axum::serve(api_listener, server::router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!(target = "router", "shut down");
     Ok(())
-
 }
 
+async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, RouterError> {
+    tokio::net::lookup_host((host, port))
+        .await?
+        .next()
+        .ok_or_else(|| std::io::Error::other(format!("no address for {host}:{port}")).into())
+}
 
+async fn shutdown_signal() {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        tracing::error!(target = "router", error = %e, "failed to listen for ctrl-c");
+        std::future::pending::<()>().await;
+    }
+    tracing::info!(target = "router", "shutdown signal received");
+}
 
-/// File watcher: reloads the config file when it changes (hot reload).
-///
-/// On a `Modify` event it re-reads the HOCON file, validates it, swaps the
-/// `Arc<Config>`, and rebuilds the route engine — without dropping active
-/// connections.
-async fn watch_config_file(path: String, state: Arc<api::server::AppState>) {
-    use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
+/// Reload the config when the file changes. A successful reload swaps the
+/// routing state and connectors and restarts health checks; in-flight
+/// tunnels are not interrupted. A failed reload keeps the old state.
+async fn watch_config_file(path: String, state: Arc<AppState>) {
+    use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 
     // Unbounded + non-blocking send keeps notify's thread from stalling, and
     // the async receiver never blocks a runtime worker.
@@ -355,7 +189,7 @@ async fn watch_config_file(path: String, state: Arc<api::server::AppState>) {
         tracing::error!(target = "config", error = %e, path = %path, "failed to watch config file");
         return;
     }
-    tracing::info!(target = "config", path = %path, "config file watcher started (M8 hot reload)");
+    tracing::info!(target = "config", path = %path, "config file watcher started");
 
     let file_name = target.file_name();
     while let Some(res) = rx.recv().await {
@@ -364,8 +198,23 @@ async fn watch_config_file(path: String, state: Arc<api::server::AppState>) {
                 if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
                     && event.paths.iter().any(|p| p.file_name() == file_name) =>
             {
-                tracing::info!(target = "config", "config file changed; reloading (M8)");
-                handle_config_reload(&path, &state.config).await;
+                // One save emits a burst of events; let it settle, then reload once.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                while rx.try_recv().is_ok() {}
+                tracing::info!(target = "config", "config file changed; reloading");
+                match state.reload() {
+                    Ok(c) => tracing::info!(
+                        target = "config",
+                        proxies = c.proxies.len(),
+                        rules = c.rules.len(),
+                        "config reloaded"
+                    ),
+                    Err(e) => tracing::error!(
+                        target = "config",
+                        error = %e,
+                        "config reload failed; keeping old config"
+                    ),
+                }
             }
             Ok(_) => {}
             Err(e) => tracing::error!(target = "config", error = %e, "config watch channel error"),
@@ -373,55 +222,33 @@ async fn watch_config_file(path: String, state: Arc<api::server::AppState>) {
     }
 }
 
-/// Swap the running config for the freshly parsed one and rebuild the route
-/// engine. Does not touch the upstream manager (active connections preserved).
-async fn handle_config_reload(path: &str, config_holder: &config::holder::ConfigHolder) {
-    match config_holder.reload(path) {
-        Ok(new_config) => {
-            tracing::info!(
-                target = "config",
-                "config reloaded; swapped Arc<Config> and rebuilt route engine (proxies: {}, rules: {})",
-                new_config.proxies.len(),
-                new_config.rules.len(),
-            );
-        }
-        Err(e) => {
-            tracing::error!(target = "config", error = %e, "config reload failed; keeping old config");
-        }
-    }
+fn run_config_validate(config_path: &str) -> Result<(), RouterError> {
+    reload(config_path)?;
+    println!("Config is valid: {config_path}");
+    Ok(())
 }
 
-/// CLI: print the resolved configuration (validated) to stdout.
-///
-/// Reads and validates the HOCON file without starting listeners or
-/// spawning tasks, then prints the internal model in a compact tree.
+/// Print the validated configuration as a compact tree.
 fn run_config_print(config_path: &str) -> Result<(), RouterError> {
     let config = reload(config_path)?;
 
-    // Human-readable output — a compact tree, not raw JSON.
-    fn fmt_duration(d: &std::time::Duration) -> String {
-        format!("{}s", d.as_secs())
-    }
-
-    fn proxy_type_str(t: &config::models::ProxyType) -> &'static str {
-        match t {
-            config::models::ProxyType::Http => "Http",
-            config::models::ProxyType::Socks5 => "Socks5",
-        }
-    }
-
-    println!("config: {}", config_path);
+    println!("config: {config_path}");
     println!("listen: {}:{}", config.listen.host, config.listen.port);
     println!();
     println!("proxies:");
     for p in &config.proxies {
-        let h = fmt_duration(&p.health.interval);
-        let t = fmt_duration(&p.health.timeout);
+        let kind = match p.r#type {
+            ProxyType::Http => "Http",
+            ProxyType::Socks5 => "Socks5",
+        };
         println!(
-            "  - {}: {} -> {}:{}  [health: interval={}, timeout={}]",
-            p.name, proxy_type_str(&p.r#type), p.host, p.port, h, t
+            "  - {}: {kind} -> {}:{}  [health: interval={}s, timeout={}s]",
+            p.name,
+            p.host,
+            p.port,
+            p.health.interval.as_secs(),
+            p.health.timeout.as_secs()
         );
     }
-
     Ok(())
 }

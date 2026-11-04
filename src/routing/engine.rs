@@ -10,13 +10,12 @@ use crate::routing::matcher::RuleMatcher;
 /// Resolution chain (transparent to rules):
 ///
 /// ```text
-/// ViaProxy("office")  → UpstreamManager::resolve("office") → Arc<DirectConnector>
-/// ViaProxy("europe")  → UpstreamManager::resolve("europe") → group strategy → Arc<ConcreteConnector>
-/// ViaProxy("nope")    → Err(RouterError::UnknownUpstream)  → proxied as failed connection
+/// Direct              → DirectConn
+/// ViaProxy("office")  → UpstreamManager::resolve("office") → connector
+/// ViaProxy("nope")    → Err(UpstreamError::UnknownUpstream) → 502 to the client
 /// ```
 ///
-/// The group resolution is transparent to rules: rules only ever name a
-/// proxy or a group. Strategy (failover etc.) is stored per group, not per rule.
+/// Health data is observable via the API but does not influence routing.
 pub struct RouteEngine {
     matcher: RuleMatcher,
 }
