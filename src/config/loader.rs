@@ -5,7 +5,8 @@
 
 use tracing::{info, warn};
 
-use crate::config::models::{Api, Config, DefaultRule, HealthConfig, Listen, Proxy, ProxyType, Rule, RuleTarget};
+use crate::config::models::{Api, Condition, Config, HealthConfig, Listen, Proxy, ProxyType, Rule, RuleTarget};
+use crate::routing::matcher::validate_rule;
 use crate::shared::error::{ConfigError, RouterError};
 
 /// Load configuration from a HOCON file.
@@ -45,41 +46,43 @@ fn read_file(path: &str) -> Result<String, RouterError> {
 }
 
 fn parse_hocon(content: &str) -> Result<Config, RouterError> {
-    match hocon::parse(content) {
-        Ok(hocon_config) => {
-            let config = Config {
-                listen: parse_listen(&hocon_config)?,
-                api: parse_api(&hocon_config)?,
-                proxies: parse_proxies(&hocon_config)?,
-                
-                rules: parse_rules(&hocon_config)?,
-                default: parse_default_rule(&hocon_config)?,
-            };
-
-            Ok(config)
-        }
-        Err(e) => Err(ConfigError::HoconParse(e.to_string()).into()),
-    }
+    let hocon_config = hocon::parse(content).map_err(|e| ConfigError::HoconParse(e.to_string()))?;
+    let config = Config {
+        listen: parse_listen(&hocon_config)?,
+        api: parse_api(&hocon_config)?,
+        proxies: parse_proxies(&hocon_config)?,
+        rules: parse_rules(&hocon_config)?,
+        default: parse_default_rule(&hocon_config)?,
+    };
+    validate_references(&config)?;
+    Ok(config)
 }
 
 fn parse_listen(config: &hocon::Config) -> Result<Listen, RouterError> {
-    let host = config
-        .get_string_option("listen.host")
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = config
-        .get_i64_option("listen.port")
-        .unwrap_or(3128) as u16;
-    Ok(Listen { host, port })
+    let defaults = Listen::default();
+    Ok(Listen {
+        host: config.get_string_option("listen.host").unwrap_or(defaults.host),
+        port: port_or("listen.port", config.get_i64_option("listen.port"), defaults.port)?,
+    })
 }
 
 fn parse_api(config: &hocon::Config) -> Result<Api, RouterError> {
-    let host = config
-        .get_string_option("api.host")
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = config
-        .get_i64_option("api.port")
-        .unwrap_or(8080) as u16;
-    Ok(Api { host, port })
+    let defaults = Api::default();
+    Ok(Api {
+        host: config.get_string_option("api.host").unwrap_or(defaults.host),
+        port: port_or("api.port", config.get_i64_option("api.port"), defaults.port)?,
+    })
+}
+
+fn port_or(key: &str, value: Option<i64>, default: u16) -> Result<u16, RouterError> {
+    value.map_or(Ok(default), |p| valid_port(key, p))
+}
+
+fn valid_port(key: &str, value: i64) -> Result<u16, RouterError> {
+    u16::try_from(value)
+        .ok()
+        .filter(|p| *p != 0)
+        .ok_or_else(|| ConfigError::Validation(format!("{key}: port {value} out of range 1-65535")).into())
 }
 
 fn parse_proxies(config: &hocon::Config) -> Result<Vec<Proxy>, RouterError> {
@@ -106,7 +109,11 @@ fn parse_proxy_value(value: hocon::HoconValue) -> Result<Proxy, RouterError> {
                 "name" => name = v.as_str().map(|s| s.to_string()),
                 "type" => proxy_type = parse_proxy_type(v),
                 "host" => host = v.as_str().map(|s| s.to_string()),
-                "port" => port = v.as_i64().map(|p| p as u16),
+                "port" => {
+                    if let Some(p) = v.as_i64() {
+                        port = Some(valid_port("proxies[].port", p)?);
+                    }
+                }
                 "health" => {
                     if let hocon::HoconValue::Object(hmap) = v {
                         for (hk, hv) in hmap {
@@ -177,71 +184,71 @@ fn parse_rules(config: &hocon::Config) -> Result<Vec<Rule>, RouterError> {
 }
 
 fn parse_rule_value(value: hocon::HoconValue) -> Result<Rule, RouterError> {
-    let mut wildcard_domain: Option<String> = None;
-    let mut exact_host: Option<String> = None;
-    let mut cidr: Option<String> = None;
+    let mut conditions = Vec::new();
     let mut route: Option<RuleTarget> = None;
 
     if let hocon::HoconValue::Object(map) = value {
         for (key, v) in map {
-            match key.as_str() {
-                "domain" => wildcard_domain = v.as_str().map(|s| s.to_string()),
-                "host" => exact_host = v.as_str().map(|s| s.to_string()),
-                "cidr" => cidr = v.as_str().map(|s| s.to_string()),
-                "route" => route = parse_route_value(v),
+            match (key.as_str(), v.as_str()) {
+                ("domain", Some(d)) => conditions.push(Condition::Domain(d.to_string())),
+                ("host", Some(h)) => conditions.push(Condition::Host(h.to_string())),
+                ("cidr", Some(c)) => {
+                    let net = c
+                        .parse()
+                        .map_err(|e| ConfigError::Validation(format!("invalid cidr '{c}': {e}")))?;
+                    conditions.push(Condition::Cidr(net));
+                }
+                ("route", _) => route = parse_route_value(v),
                 _ => {}
             }
         }
     }
 
-    let route = route.ok_or(ConfigError::MissingRoute)?;
-
-    Ok(Rule {
-        wildcard_domain,
-        exact_host,
-        cidr,
-        route,
-    })
+    let rule = Rule {
+        conditions,
+        route: route.ok_or(ConfigError::MissingRoute)?,
+    };
+    validate_rule(&rule).map_err(ConfigError::Validation)?;
+    Ok(rule)
 }
 
 fn parse_route_value(value: hocon::HoconValue) -> Option<RuleTarget> {
-    match value.as_str() {
-        Some("direct") => Some(RuleTarget::Direct),
-        Some(s) => {
-            // Support "proxy:name", "group:name", or bare proxy name
-            let parts: Vec<&str> = s.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                match parts[0] {
-                    "proxy" => Some(RuleTarget::Proxy(parts[1].to_string())),
-                    "group" => Some(RuleTarget::Proxy(parts[1].to_string())),
-                    _ => None,
-                }
-            } else {
-                // Bare proxy name (no colon) - treat as direct proxy reference
-                Some(RuleTarget::Proxy(s.to_string()))
-            }
-        }
-        None => None,
+    value.as_str().and_then(parse_target)
+}
+
+fn parse_target(s: &str) -> Option<RuleTarget> {
+    if s.eq_ignore_ascii_case("direct") {
+        return Some(RuleTarget::Direct);
+    }
+    // "proxy:name", "group:name", or a bare proxy name
+    match s.split_once(':') {
+        Some(("proxy" | "group", name)) if !name.is_empty() => Some(RuleTarget::Proxy(name.to_string())),
+        Some(_) => None,
+        None => Some(RuleTarget::Proxy(s.to_string())),
     }
 }
 
-/// Validate that every proxy group member resolves to an already-registered
-/// proxy name. Groups with missing members are a configuration error: the
-/// group can never be selected, so it is better to fail fast than to wait
-/// for a runtime lookup to fail.
+/// Every proxy named by a rule or the default rule must be configured.
+fn validate_references(config: &Config) -> Result<(), RouterError> {
+    let known = |name: &str| config.proxies.iter().any(|p| p.name == name);
+    config
+        .rules
+        .iter()
+        .map(|r| &r.route)
+        .chain(std::iter::once(&config.default))
+        .find_map(|target| match target {
+            RuleTarget::Proxy(name) if !known(name) => Some(name),
+            _ => None,
+        })
+        .map_or(Ok(()), |name| {
+            Err(ConfigError::Validation(format!("unknown proxy referenced: {name}")).into())
+        })
+}
 
-
-fn parse_default_rule(config: &hocon::Config) -> Result<DefaultRule, RouterError> {
+fn parse_default_rule(config: &hocon::Config) -> Result<RuleTarget, RouterError> {
     let default_str = config
         .get_string_option("default")
         .unwrap_or_else(|| "direct".to_string());
-
-    match default_str.to_lowercase().as_str() {
-        "direct" => Ok(DefaultRule::Direct),
-        "proxy" => Ok(DefaultRule::Proxy(String::new())),
-        s => {
-            tracing::warn!(target = "config", "Unknown default rule: {}", s);
-            Ok(DefaultRule::Direct)
-        }
-    }
+    parse_target(&default_str)
+        .ok_or_else(|| ConfigError::Validation(format!("invalid default rule '{default_str}'")).into())
 }

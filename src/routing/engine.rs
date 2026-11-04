@@ -23,7 +23,7 @@ pub struct RouteEngine {
 
 impl RouteEngine {
     /// Create a new route engine from configured rules.
-    pub fn new(rules: Vec<crate::config::models::Rule>, default: crate::config::models::DefaultRule) -> Self {
+    pub fn new(rules: Vec<crate::config::models::Rule>, default: crate::config::models::RuleTarget) -> Self {
         Self {
             matcher: RuleMatcher::new(rules, default),
         }

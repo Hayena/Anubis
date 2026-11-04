@@ -1,98 +1,90 @@
 //! Health state storage.
 
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
+use std::time::SystemTime;
 
 use crate::health::checker::HealthState;
 
 /// Read/write health-store contract.
 ///
 /// The health checker writes state; managers and API handlers read it.
+/// Reads return a consistent [`HealthState`] snapshot per proxy.
 pub trait HealthStore: Send + Sync {
     /// Record a successful or failed health assessment for a proxy.
     fn set_healthy(&self, name: &str, healthy: bool, latency_ms: Option<f64>);
 
+    /// Snapshot of a proxy's state (None if never checked).
+    fn get(&self, name: &str) -> Option<HealthState>;
+
     /// Whether a proxy is currently considered healthy.
-    fn is_healthy(&self, name: &str) -> bool;
-
-    /// Last measured RTT in milliseconds (None if unmeasured).
-    fn latency_ms(&self, name: &str) -> Option<f64>;
-
-    /// Time of the last successful health check.
-    fn last_success(&self, name: &str) -> Option<std::time::SystemTime>;
-
-    /// Time of the last failed health check.
-    fn last_failure(&self, name: &str) -> Option<std::time::SystemTime>;
+    fn is_healthy(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|s| s.healthy)
+    }
 }
 
-/// In-memory health store ( RwLock-protected BTreeMap ).
+/// In-memory health store (RwLock-protected BTreeMap).
+#[derive(Default)]
 pub struct InMemoryHealthStore {
     states: RwLock<BTreeMap<String, HealthState>>,
 }
 
 impl InMemoryHealthStore {
     pub fn new() -> Self {
-        Self {
-            states: RwLock::new(BTreeMap::new()),
-        }
+        Self::default()
     }
 }
 
 impl HealthStore for InMemoryHealthStore {
     fn set_healthy(&self, name: &str, healthy: bool, latency_ms: Option<f64>) {
-        let mut map = self.states.write().unwrap();
-        let now = std::time::SystemTime::now();
-        if let Some(state) = map.get_mut(name) {
-            state.healthy = healthy;
-            state.latency_ms = latency_ms.unwrap_or(f64::NAN);
-            if healthy {
-                state.last_success = Some(now);
-            } else {
-                state.last_failure = Some(now);
-            }
+        let now = SystemTime::now();
+        let mut map = self.states.write().unwrap_or_else(PoisonError::into_inner);
+        let state = map.entry(name.to_string()).or_insert(HealthState {
+            healthy,
+            latency_ms: None,
+            last_success: None,
+            last_failure: None,
+        });
+        state.healthy = healthy;
+        state.latency_ms = latency_ms;
+        *(if healthy {
+            &mut state.last_success
         } else {
-            map.insert(
-                name.to_string(),
-                HealthState {
-                    healthy,
-                    latency_ms: latency_ms.unwrap_or(f64::NAN),
-                    last_success: if healthy { Some(now) } else { None },
-                    last_failure: if !healthy { Some(now) } else { None },
-                },
-            );
-        }
+            &mut state.last_failure
+        }) = Some(now);
     }
 
-    fn is_healthy(&self, name: &str) -> bool {
+    fn get(&self, name: &str) -> Option<HealthState> {
         self.states
             .read()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .get(name)
-            .map(|s| s.healthy)
-            .unwrap_or(false)
+            .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_proxy_is_unhealthy_and_has_no_state() {
+        let store = InMemoryHealthStore::new();
+        assert!(!store.is_healthy("x"));
+        assert!(store.get("x").is_none());
     }
 
-    fn latency_ms(&self, name: &str) -> Option<f64> {
-        self.states
-            .read()
-            .unwrap()
-            .get(name)
-            .map(|s| s.latency_ms)
-    }
+    #[test]
+    fn tracks_latency_and_last_success_and_failure() {
+        let store = InMemoryHealthStore::new();
+        store.set_healthy("p", true, Some(12.5));
+        let s = store.get("p").unwrap();
+        assert!(s.healthy && s.last_failure.is_none());
+        assert_eq!(s.latency_ms, Some(12.5));
 
-    fn last_success(&self, name: &str) -> Option<std::time::SystemTime> {
-        self.states
-            .read()
-            .unwrap()
-            .get(name)
-            .and_then(|s| s.last_success)
-    }
-
-    fn last_failure(&self, name: &str) -> Option<std::time::SystemTime> {
-        self.states
-            .read()
-            .unwrap()
-            .get(name)
-            .and_then(|s| s.last_failure)
+        store.set_healthy("p", false, None);
+        let s = store.get("p").unwrap();
+        assert!(!s.healthy && s.last_success.is_some() && s.last_failure.is_some());
+        assert_eq!(s.latency_ms, None);
     }
 }

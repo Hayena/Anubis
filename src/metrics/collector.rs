@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Mutex, PoisonError};
 
 /// In-memory metrics collector (ADR §3.9).
 ///
@@ -14,9 +15,13 @@ pub struct Metrics {
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
     /// Per-proxy selection counts.
-    proxy_selections: BTreeMap<String, AtomicU64>,
-    /// EWMA per-proxy latency (updated by the health checker).
-    avg_latency_ms: BTreeMap<String, f64>,
+    proxy_selections: Mutex<BTreeMap<String, u64>>,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Metrics {
@@ -27,14 +32,33 @@ impl Metrics {
             active_connections: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
-            proxy_selections: BTreeMap::new(),
-            avg_latency_ms: BTreeMap::new(),
+            proxy_selections: Mutex::new(BTreeMap::new()),
         }
     }
 
     /// Increment the open connections counter.
     pub fn increment_opened(&self) {
         self.connections_opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Count one routing selection of the named proxy.
+    pub fn record_selection(&self, proxy: &str) {
+        *self
+            .proxy_selections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(proxy.to_string())
+            .or_default() += 1;
+    }
+
+    pub fn increment_failed(&self) {
+        self.connections_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record bytes relayed to (`out`) and from (`in_`) the upstream.
+    pub fn add_bytes(&self, in_: u64, out: u64) {
+        self.bytes_in.fetch_add(in_, std::sync::atomic::Ordering::Relaxed);
+        self.bytes_out.fetch_add(out, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn increment_active(&self) {
@@ -55,10 +79,9 @@ impl Metrics {
             bytes_out: self.bytes_out.load(std::sync::atomic::Ordering::Relaxed),
             proxy_selections: self
                 .proxy_selections
-                .iter()
-                .map(|(k, v)| (k.clone(), v.load(std::sync::atomic::Ordering::Relaxed)))
-                .collect(),
-            avg_latency_ms: self.avg_latency_ms.clone(),
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
         }
     }
 }
@@ -72,5 +95,4 @@ pub struct MetricsSnapshot {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub proxy_selections: BTreeMap<String, u64>,
-    pub avg_latency_ms: BTreeMap<String, f64>,
 }

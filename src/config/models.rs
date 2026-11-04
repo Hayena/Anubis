@@ -18,13 +18,32 @@ pub struct Config {
     pub rules: Vec<Rule>,
 
     #[serde(default)]
-    pub default: DefaultRule,
+    pub default: RuleTarget,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Listen {
+    #[serde(default = "default_host")]
     pub host: String,
+    #[serde(default = "default_listen_port")]
     pub port: u16,
+}
+
+impl Default for Listen {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_listen_port(),
+        }
+    }
+}
+
+fn default_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_listen_port() -> u16 {
+    3128
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,13 +62,22 @@ pub enum ProxyType {
     Socks5,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
     #[serde(default = "default_30s")]
     pub interval: std::time::Duration,
 
     #[serde(default = "default_5s")]
     pub timeout: std::time::Duration,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            interval: default_30s(),
+            timeout: default_5s(),
+        }
+    }
 }
 
 fn default_30s() -> std::time::Duration {
@@ -61,36 +89,48 @@ fn default_5s() -> std::time::Duration {
 }
 
 /// REST API server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Api {
+    #[serde(default = "default_host")]
     pub host: String,
     #[serde(default = "default_api_port")]
     pub port: u16,
+}
+
+impl Default for Api {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_api_port(),
+        }
+    }
 }
 
 fn default_api_port() -> u16 {
     8080
 }
 
+/// A single match condition of a rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Condition {
+    /// Hostname pattern; `*` matches one or more non-dot characters.
+    Domain(String),
+    /// Exact hostname (case-insensitive).
+    Host(String),
+    /// IP range.
+    Cidr(ipnet::IpNet),
+}
+
+/// A routing rule. Conditions are OR-ed; a rule without conditions is a
+/// catch-all that matches every destination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
-    #[serde(rename = "domain")]
-    pub wildcard_domain: Option<String>,
-    #[serde(rename = "host")]
-    pub exact_host: Option<String>,
-    #[serde(rename = "cidr")]
-    pub cidr: Option<String>,
+    pub conditions: Vec<Condition>,
     pub route: RuleTarget,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RuleTarget {
-    Direct,
-    Proxy(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub enum DefaultRule {
     #[default]
     Direct,
     Proxy(String),

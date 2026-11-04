@@ -10,14 +10,11 @@ pub enum RouterError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Upgrade error: {0}")]
-    Upgrade(#[from] UpgradeError),
+    #[error("Upstream error: {0}")]
+    Upstream(#[from] UpstreamError),
 
-    #[error("Routing error: {0}")]
-    Routing(#[from] RoutingError),
-
-    #[error("Decode error: {0}")]
-    Decode(String),
+    #[error("Invalid destination: {0}")]
+    Destination(#[from] DestinationError),
 }
 
 #[derive(Error, Debug)]
@@ -51,11 +48,45 @@ pub enum ConfigError {
 }
 
 #[derive(Error, Debug)]
-pub enum UpgradeError {
+pub enum UpstreamError {
     #[error("Unknown upstream: {0}")]
     UnknownUpstream(String),
+
+    #[error("Upstream connect failed: {0}")]
+    Connect(#[from] ConnectError),
 }
 
+/// Failure to establish a transport connection to a destination.
 #[derive(Error, Debug)]
-pub enum RoutingError {
+pub enum ConnectError {
+    #[error("{context}: {source}")]
+    Io {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("handshake failed: {0}")]
+    Handshake(String),
+
+    #[error("proxy rejected CONNECT: {0}")]
+    Rejected(String),
+
+    #[error("timed out after {0:?}")]
+    Timeout(std::time::Duration),
+}
+
+impl ConnectError {
+    pub fn io(context: &'static str) -> impl FnOnce(std::io::Error) -> Self {
+        move |source| Self::Io { context, source }
+    }
+}
+
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum DestinationError {
+    #[error("host is empty")]
+    EmptyHost,
+
+    #[error("port must be 1-65535")]
+    InvalidPort,
 }

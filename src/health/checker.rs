@@ -3,18 +3,14 @@
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time;
-use tracing;
 
 /// Per-proxy health state.
 #[derive(Debug, Clone)]
 pub struct HealthState {
     pub healthy: bool,
-    pub latency_ms: f64,
+    pub latency_ms: Option<f64>,
     pub last_success: Option<std::time::SystemTime>,
     pub last_failure: Option<std::time::SystemTime>,
-}
-
-impl HealthState {
 }
 
 /// Background health checker for a single upstream proxy.

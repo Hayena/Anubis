@@ -58,9 +58,7 @@ use upstream::traits::UpstreamConnector;
 
 
 #[derive(Parser, Debug)]
-
 #[command(name = "anubis", version = "0.1.0", about = "Local forward proxy with adaptive routing")]
-
 struct CliArgs {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -166,25 +164,10 @@ async fn run(args: CliArgs) -> Result<(), RouterError> {
 
     // Milestone 2: Core route engine, held in a swappable `ConfigHolder`.
 
-    let config_holder = api::server::ConfigHolder::new(config);
+    let config_holder = Arc::new(config::holder::ConfigHolder::new(config));
 
-    let engine = config_holder.current_engine();
 
     let config = config_holder.current_config();
-
-
-
-    // Demo routing decision.
-
-    let test_dest = shared::types::Destination::new("dev.company.com", 443).map_err(|e| {
-
-        RouterError::Config(shared::error::ConfigError::Validation(format!("test dest: {e}")))
-
-    })?;
-
-    let decision = engine.select(&test_dest);
-
-    tracing::info!(target = "router", ?decision, "Route selection for destination");
 
 
 
@@ -262,7 +245,7 @@ async fn run(args: CliArgs) -> Result<(), RouterError> {
 
     let proxy = proxy::listener::Proxy::new(
 
-        config_holder.current_engine(),
+        Arc::clone(&config_holder),
 
         manager_arc.clone(),
 
@@ -290,7 +273,7 @@ async fn run(args: CliArgs) -> Result<(), RouterError> {
     // Build shared API state with swappable config (Milestone 8).
 
     let state = Arc::new(api::server::AppState::new(
-        config_holder,
+        Arc::clone(&config_holder),
         Arc::clone(&metrics),
         health.clone(),
         args.config.clone(),
@@ -341,94 +324,58 @@ async fn run(args: CliArgs) -> Result<(), RouterError> {
 
 
 /// File watcher: reloads the config file when it changes (hot reload).
-
 ///
-
 /// On a `Modify` event it re-reads the HOCON file, validates it, swaps the
-
 /// `Arc<Config>`, and rebuilds the route engine — without dropping active
-
 /// connections.
-
 async fn watch_config_file(path: String, state: Arc<api::server::AppState>) {
+    use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 
-    use notify::{recommended_watcher, RecursiveMode, Watcher};
-
-
-
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-
+    // Unbounded + non-blocking send keeps notify's thread from stalling, and
+    // the async receiver never blocks a runtime worker.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut watcher = match recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-
         let _ = tx.send(res);
-
     }) {
-
         Ok(w) => w,
-
         Err(e) => {
-
             tracing::error!(target = "config", error = %e, "failed to create config watcher");
-
             return;
-
         }
-
     };
 
-
-
-    if let Err(e) = watcher.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive) {
-
+    // Watch the parent directory: editors that save via rename/replace would
+    // otherwise detach a watch placed on the file itself.
+    let target = std::path::Path::new(&path);
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
         tracing::error!(target = "config", error = %e, path = %path, "failed to watch config file");
-
         return;
-
     }
-
     tracing::info!(target = "config", path = %path, "config file watcher started (M8 hot reload)");
 
-
-
-    loop {
-
-        let res = match rx.recv() {
-
-            Ok(r) => r,
-
-            Err(_) => break,
-
-        };
-
+    let file_name = target.file_name();
+    while let Some(res) = rx.recv().await {
         match res {
-
-            Ok(event) => {
-
-                if event.kind.is_modify() {
-
-                    tracing::info!(target = "config", "config file modified; reloading (M8)");
-
-                    handle_config_reload(&path, &state.config).await;
-
-                }
-
+            Ok(event)
+                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+                    && event.paths.iter().any(|p| p.file_name() == file_name) =>
+            {
+                tracing::info!(target = "config", "config file changed; reloading (M8)");
+                handle_config_reload(&path, &state.config).await;
             }
-
+            Ok(_) => {}
             Err(e) => tracing::error!(target = "config", error = %e, "config watch channel error"),
-
         }
-
     }
-
 }
 
-
-
 /// Swap the running config for the freshly parsed one and rebuild the route
-
 /// engine. Does not touch the upstream manager (active connections preserved).
-
-async fn handle_config_reload(path: &str, config_holder: &api::server::ConfigHolder) {
+async fn handle_config_reload(path: &str, config_holder: &config::holder::ConfigHolder) {
     match config_holder.reload(path) {
         Ok(new_config) => {
             tracing::info!(

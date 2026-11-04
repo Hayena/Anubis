@@ -27,7 +27,7 @@ hocon-parser = { version = "1.14", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
-ipnet = "2"
+ipnet = { version = "2", features = ["serde"] }
 regex = "1"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }

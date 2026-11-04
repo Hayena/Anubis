@@ -12,9 +12,9 @@ pub mod shared;
 pub mod upstream;
 
 // Re-exports for convenience
-pub use config::models::{DefaultRule, Listen, Proxy, Rule, RuleTarget};
+pub use config::models::{Condition, Listen, Proxy, Rule, RuleTarget};
 pub use health::checker::{HealthChecker, HealthState};
 pub use health::store::{HealthStore, InMemoryHealthStore};
 pub use routing::decision::RoutingDecision;
-pub use shared::error::{ConfigError, RouterError, UpgradeError, RoutingError};
+pub use shared::error::{ConfigError, ConnectError, DestinationError, RouterError, UpstreamError};
 pub use shared::types::Destination;

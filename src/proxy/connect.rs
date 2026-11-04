@@ -1,35 +1,25 @@
-//! CONNECT request handling and upstream routing.
+//! Upstream routing for a destination.
 
-use std::sync::Arc;
-
-use crate::routing::engine::RouteEngine;
+use crate::routing::decision::RoutingDecision;
+use crate::shared::error::{ConnectError, RouterError};
 use crate::shared::types::Destination;
+use crate::upstream::connection::Connection;
 use crate::upstream::direct::DirectConn;
 use crate::upstream::manager::UpstreamManager;
 use crate::upstream::traits::UpstreamConnector;
-use crate::upstream::connection::Connection;
-use crate::shared::error::RouterError;
 
-/// Route a destination to a concrete upstream connector and establish the
-/// transport connection.
+/// Establish the transport connection for an already-made routing decision.
 ///
-/// * `Direct` routes to the direct transport (`DirectConn`) — no upstream proxy.
-/// * `ViaProxy(name)` routes through the named upstream after manager
-///   resolution (health-aware, fail-closed).
-pub async fn route_upstream(
+/// * `Direct` uses the direct transport (`DirectConn`) — no upstream proxy.
+/// * `ViaProxy(name)` uses the named upstream; an unknown name fails closed.
+pub async fn connect_upstream(
+    decision: &RoutingDecision,
     dest: &Destination,
-    engine: Arc<RouteEngine>,
-    manager: Arc<UpstreamManager>,
+    manager: &UpstreamManager,
 ) -> Result<Box<dyn Connection>, RouterError> {
-    use crate::routing::decision::RoutingDecision;
-
-    let decision = engine.select(dest);
-    let connector = match decision {
-        RoutingDecision::Direct => Arc::new(DirectConn) as Arc<dyn UpstreamConnector>,
-        RoutingDecision::ViaProxy(name) => manager.resolve(&name)?,
+    let conn = match decision {
+        RoutingDecision::Direct => DirectConn.connect(dest).await,
+        RoutingDecision::ViaProxy(name) => manager.resolve(name)?.connect(dest).await,
     };
-    connector
-        .connect(dest)
-        .await
-        .map_err(|e| RouterError::Decode(format!("upstream connect failed: {e}")))
+    conn.map_err(|e: ConnectError| RouterError::Upstream(e.into()))
 }
