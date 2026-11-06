@@ -15,6 +15,7 @@ use anubis::config::models::ProxyType;
 use anubis::health::store::{HealthStore, InMemoryHealthStore};
 use anubis::metrics::collector::Metrics;
 use anubis::proxy::listener::Proxy;
+use std::net::{Ipv4Addr, SocketAddr};
 use anubis::shared::error::RouterError;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -121,7 +122,7 @@ async fn run(args: &CliArgs) -> Result<(), RouterError> {
 
     let config = holder.current_config();
 
-    let proxy_addr = resolve(&config.listen.host, config.listen.port).await?;
+    let proxy_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.proxy_port));
     let proxy_listener = Proxy::bind(proxy_addr).await?;
     let proxy = Proxy::new(Arc::clone(&holder), Arc::clone(&metrics), health);
     tokio::spawn(async move {
@@ -134,7 +135,7 @@ async fn run(args: &CliArgs) -> Result<(), RouterError> {
         tokio::spawn(watch_config_file(args.config.clone(), Arc::clone(&state)));
     }
 
-    let api_addr = resolve(&config.api.host, config.api.port).await?;
+    let api_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.api_port));
     let api_listener = tokio::net::TcpListener::bind(api_addr).await?;
     tracing::info!(target = "router", bind = %api_addr, "REST API listening");
 
@@ -143,13 +144,6 @@ async fn run(args: &CliArgs) -> Result<(), RouterError> {
         .await?;
     tracing::info!(target = "router", "shut down");
     Ok(())
-}
-
-async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, RouterError> {
-    tokio::net::lookup_host((host, port))
-        .await?
-        .next()
-        .ok_or_else(|| std::io::Error::other(format!("no address for {host}:{port}")).into())
 }
 
 async fn shutdown_signal() {
@@ -234,7 +228,7 @@ fn run_config_print(config_path: &str) -> Result<(), RouterError> {
     let config = reload(config_path)?;
 
     println!("config: {config_path}");
-    println!("listen: {}:{}", config.listen.host, config.listen.port);
+    println!("listen: 127.0.0.1:{}", config.proxy_port);
     println!();
     println!("proxies:");
     for p in &config.proxies {

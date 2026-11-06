@@ -141,21 +141,19 @@ anubis config validate
 
 ## Configuration (`proxy.conf`)
 
-Anubis uses **HOCON** format. The config file has three sections: `listen`, `proxies`, and `rules`.
+Anubis uses **HOCON** format. The config file has ports plus the `proxies` and `rules` sections. Both servers always bind to `127.0.0.1`.
 
-### `listen`
+### Ports
 
 ```hocon
-listen {
-  host = "127.0.0.1"
-  port = 4001
-}
+proxyPort = 4001
+apiPort = 8080
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `host` | string | `127.0.0.1` | Listen address for the forward proxy |
-| `port` | int | `4001` | Listen port for the forward proxy |
+| `proxyPort` | int | `3128` | Port for the forward proxy |
+| `apiPort` | int | `8080` | Port for the REST API |
 
 ### `proxies`
 

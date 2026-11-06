@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anubis::config::holder::ConfigHolder;
 use anubis::config::loader::reload;
-use anubis::config::models::{Api, Config, Listen, RuleTarget};
+use anubis::config::models::{Config, RuleTarget};
 use anubis::health::store::{HealthStore, InMemoryHealthStore};
 use anubis::metrics::collector::Metrics;
 use anubis::proxy::listener::Proxy;
@@ -138,8 +138,8 @@ async fn start_proxy_with_health(
 
 fn config(rules: Vec<anubis::Rule>, default: RuleTarget) -> Config {
     Config {
-        listen: Listen::default(),
-        api: Api::default(),
+        proxy_port: 3128,
+        api_port: 8080,
         proxies: vec![],
         rules,
         default,

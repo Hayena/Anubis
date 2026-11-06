@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub listen: Listen,
+    /// Forward proxy port (always binds to 127.0.0.1).
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
 
-    /// REST API server configuration.
-    #[serde(default)]
-    pub api: Api,
+    /// REST API port (always binds to 127.0.0.1).
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
 
     #[serde(default)]
     pub proxies: Vec<Proxy>,
@@ -21,29 +22,11 @@ pub struct Config {
     pub default: RuleTarget,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Listen {
-    #[serde(default = "default_host")]
-    pub host: String,
-    #[serde(default = "default_listen_port")]
-    pub port: u16,
-}
+pub const DEFAULT_PROXY_PORT: u16 = 3128;
+pub const DEFAULT_API_PORT: u16 = 8080;
 
-impl Default for Listen {
-    fn default() -> Self {
-        Self {
-            host: default_host(),
-            port: default_listen_port(),
-        }
-    }
-}
-
-fn default_host() -> String {
-    "127.0.0.1".to_string()
-}
-
-fn default_listen_port() -> u16 {
-    3128
+fn default_proxy_port() -> u16 {
+    DEFAULT_PROXY_PORT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,26 +71,8 @@ fn default_5s() -> std::time::Duration {
     std::time::Duration::from_secs(5)
 }
 
-/// REST API server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Api {
-    #[serde(default = "default_host")]
-    pub host: String,
-    #[serde(default = "default_api_port")]
-    pub port: u16,
-}
-
-impl Default for Api {
-    fn default() -> Self {
-        Self {
-            host: default_host(),
-            port: default_api_port(),
-        }
-    }
-}
-
 fn default_api_port() -> u16 {
-    8080
+    DEFAULT_API_PORT
 }
 
 /// A single match condition of a rule.

@@ -5,7 +5,7 @@
 
 use tracing::{info, warn};
 
-use crate::config::models::{Api, Condition, Config, HealthConfig, Listen, Proxy, ProxyType, Rule, RuleTarget};
+use crate::config::models::{DEFAULT_API_PORT, DEFAULT_PROXY_PORT, Condition, Config, HealthConfig, Proxy, ProxyType, Rule, RuleTarget};
 use crate::routing::matcher::validate_rule;
 use crate::shared::error::{ConfigError, RouterError};
 
@@ -38,30 +38,14 @@ fn read_file(path: &str) -> Result<String, RouterError> {
 fn parse_hocon(content: &str) -> Result<Config, RouterError> {
     let hocon_config = hocon::parse(content).map_err(|e| ConfigError::HoconParse(e.to_string()))?;
     let config = Config {
-        listen: parse_listen(&hocon_config)?,
-        api: parse_api(&hocon_config)?,
+        proxy_port: port_or("proxyPort", hocon_config.get_i64_option("proxyPort"), DEFAULT_PROXY_PORT)?,
+        api_port: port_or("apiPort", hocon_config.get_i64_option("apiPort"), DEFAULT_API_PORT)?,
         proxies: parse_proxies(&hocon_config)?,
         rules: parse_rules(&hocon_config)?,
         default: parse_default_rule(&hocon_config)?,
     };
     validate_references(&config)?;
     Ok(config)
-}
-
-fn parse_listen(config: &hocon::Config) -> Result<Listen, RouterError> {
-    let defaults = Listen::default();
-    Ok(Listen {
-        host: config.get_string_option("listen.host").unwrap_or(defaults.host),
-        port: port_or("listen.port", config.get_i64_option("listen.port"), defaults.port)?,
-    })
-}
-
-fn parse_api(config: &hocon::Config) -> Result<Api, RouterError> {
-    let defaults = Api::default();
-    Ok(Api {
-        host: config.get_string_option("api.host").unwrap_or(defaults.host),
-        port: port_or("api.port", config.get_i64_option("api.port"), defaults.port)?,
-    })
 }
 
 fn port_or(key: &str, value: Option<i64>, default: u16) -> Result<u16, RouterError> {
@@ -237,8 +221,8 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(cfg.listen.port, 3128);
-        assert_eq!(cfg.api.port, 8080);
+        assert_eq!(cfg.proxy_port, 3128);
+        assert_eq!(cfg.api_port, 8080);
         assert_eq!(cfg.proxies[0].health.interval.as_secs(), 30);
         assert_eq!(cfg.rules[0].conditions.len(), 3);
         assert!(cfg.rules[1].conditions.is_empty());
