@@ -18,8 +18,7 @@ rust-version = "1.85"
 version = "0.1.0"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["macros", "net", "io-util", "sync", "rt-multi-thread", "signal", "fs"] }
-hyper = "1"
+tokio = { version = "1", features = ["macros", "net", "io-util", "sync", "rt-multi-thread", "signal"] }
 tokio-socks = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,16 +28,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 ipnet = { version = "2", features = ["serde"] }
 regex = "1"
-bytes = "1"
-tokio-util = { version = "0.7", features = ["io"] }
 notify = "8"
 clap = { version = "4", features = ["derive"] }
-wiremock = "0.6"
-rstest = "0.19"
-mockall = "0.13"
 async-trait = "0.1"
 axum = "0.8"
-tower = "0.5"
 
 [profile.release]
 opt-level = 3
@@ -49,8 +42,7 @@ codegen-units = 1
 opt-level = 1
 
 [dependencies]
-tokio = { workspace = true, features = ["macros", "net", "io-util", "sync", "rt-multi-thread", "signal", "fs"] }
-hyper = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "io-util", "sync", "rt-multi-thread", "signal"] }
 tokio-socks = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -60,16 +52,10 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 ipnet = { workspace = true }
 regex = { workspace = true }
-bytes = { workspace = true }
-tokio-util = { workspace = true }
 notify = { workspace = true }
 clap = { workspace = true }
-wiremock = { workspace = true }
-rstest = { workspace = true }
-mockall = { workspace = true }
-async-trait = "0.1"
-axum = "0.8"
-tower = "0.5"
+async-trait = { workspace = true }
+axum = { workspace = true }
 time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
 
 [dev-dependencies]
