@@ -306,7 +306,7 @@ fn socks_holder(upstream: SocketAddr) -> Arc<ConfigHolder> {
     std::fs::write(
         &path,
         format!(
-            "proxies = [ {{ name = \"up\", type = \"socks5\", host = \"127.0.0.1\", port = {} }} ]\n\
+            "proxies {{ up {{ type = \"socks5\", host = \"127.0.0.1\", port = {} }} }}\n\
              default = \"proxy:up\"\n",
             upstream.port()
         ),
@@ -378,7 +378,7 @@ async fn reload_reroutes_new_connections_without_restart() {
 
 fn conf_via_proxy(upstream: SocketAddr) -> String {
     format!(
-        "proxies = [ {{ name = \"up\", type = \"http\", host = \"127.0.0.1\", port = {} }} ]\n\
+        "proxies {{ up {{ type = \"http\", host = \"127.0.0.1\", port = {} }} }}\n\
          default = \"proxy:up\"\n",
         upstream.port()
     )

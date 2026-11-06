@@ -28,9 +28,6 @@ pub enum ConfigError {
     #[error("File not found: {0}")]
     FileNotFound(String),
 
-    #[error("Missing proxy name")]
-    MissingProxyName,
-
     #[error("Missing proxy type")]
     MissingProxyType,
 

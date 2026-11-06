@@ -17,7 +17,7 @@ Anubis is designed for users who want a **lightweight ElvUI-style UI** approach 
 It's ideal if you want:
 - A single binary, no systemd services or daemons required
 - CLI-driven operation (start, print config, validate config)
-- Adaptive routing with health checks and failover/lowest-latency strategies
+- Adaptive routing with per-proxy health checks
 - Hot config reload while running
 
 ---
@@ -157,41 +157,41 @@ apiPort = 8080
 
 ### `proxies`
 
-Each entry in `proxies` is a named upstream. The proxy router selects between these upstreams based on rules and group strategies.
+`proxies` is an object keyed by proxy name. The router selects between these upstreams based on rules.
 
 ```hocon
-proxies = [
-  {
-    name = "office"
+proxies {
+  office {
     type = "http"       // or "socks5"
     host = "proxy.company.com"
     port = 8080
     health {
-      interval = 30     // seconds between health checks
-      timeout = 5       // seconds timeout
+      interval = 30s    // time between health checks
+      timeout = 5s      // time before a health check is considered failed
     }
-  },
-  {
-    name = "vpn"
+  }
+  vpn {
     type = "socks5"
     host = "vpn.example.com"
     port = 1080
     health {
-      interval = 60
-      timeout = 10
+      interval = 1m
+      timeout = 10s
     }
   }
-]
+}
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Unique identifier for this proxy |
+| *(key)* | string | Unique name of this proxy, used in `route` |
 | `type` | `http` \| `socks5` | Transport type |
 | `host` | string | Upstream proxy hostname |
 | `port` | int | Upstream proxy port |
-| `health.interval` | int | Seconds between health checks |
-| `health.timeout` | int | Seconds before a health check is considered failed |
+| `health.interval` | duration | Time between health checks (default `30s`) |
+| `health.timeout` | duration | Time before a health check is considered failed (default `5s`) |
+
+Durations use HOCON syntax (`500ms`, `30s`, `1m`) and must be positive. A bare number is read as milliseconds.
 
 **Built-in proxy types:**
 - `http` — HTTP CONNECT proxy
@@ -199,7 +199,7 @@ proxies = [
 
 ### `rules`
 
-Rules match outgoing connections and route them to a proxy (or group) or direct.
+Rules match outgoing connections and route them to a proxy or direct.
 
 ```hocon
 rules = [
@@ -218,18 +218,18 @@ rules = [
   {
     cidr = "10.0.0.0/8"
     route = "direct"
-  },
-  {
-    route = "direct"               // default fallback
   }
 ]
+
+// used when no rule matches
+default = "direct"
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `domain` | string | Hostname pattern (*.example.com) |
 | `cidr` | string | IP range (e.g. `10.0.0.0/8`) |
-| `route` | string | Proxy name, group name, or `direct` |
+| `route` | string | Proxy name (or `proxy:name`), or `direct` |
 
 **Matching order:** Rules are evaluated top to bottom. The first matching rule wins.
 
@@ -241,14 +241,13 @@ rules = [
 Client → [Proxy] → (selected upstream) → destination
           |
           ├── Rule match (domain/CIDR)
-          ├── Group strategy (failover/lowest_latency)
           └── Health check (per-proxy)
 ```
 
 1. **Client** connects to Anubis (port 4001) and sends a `CONNECT` request (HTTPS) or an absolute-form request such as `GET http://host/path` (plain HTTP). Plain-HTTP requests are rewritten to origin-form and sent with `Connection: close`, one request per connection. Anything else gets a `400`.
 2. **Proxy listener** receives the connection and routes it.
 3. **Route engine** matches the destination against `rules`.
-4. **Upstream manager** selects a proxy from the matched group using the group's strategy.
+4. **Upstream manager** uses the proxy named by the matched rule.
 5. **Upstream connector** establishes the connection (Direct, HTTP CONNECT, or SOCKS5).
 6. **Health checker** monitors each proxy in the background. If a proxy's last check failed, connections routed to it get an immediate `502` instead of waiting for a timeout (they never fall back to a direct connection). A proxy that has not been checked yet is treated as usable, and it recovers on the next passing check.
 7. **REST API** exposes health and stats at `127.0.0.1:8080`.
